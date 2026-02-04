@@ -12,13 +12,12 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from web_scraper._deps import check_required, optional_hint
-from web_scraper.hardware import default_workers
-
 try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
+
+from web_scraper._deps import check_required, optional_hint
 from web_scraper.extractors import (
     find_image_urls,
     find_page_links,
@@ -27,6 +26,7 @@ from web_scraper.extractors import (
     get_best_image_url,
 )
 from web_scraper.fetcher import Fetcher
+from web_scraper.hardware import default_workers
 from web_scraper.robots import can_fetch
 from web_scraper.storage import (
     load_manifest,
@@ -90,9 +90,7 @@ def _scrape_page(
 
     # PDF pipeline
     pdf_count = 0
-    if "pdf" not in want:
-        pass
-    else:
+    if "pdf" in want:
         for pdf_url in find_pdf_urls(soup, url):
             if limit_pdfs is not None and pdf_count >= limit_pdfs:
                 break
@@ -127,9 +125,7 @@ def _scrape_page(
 
     # Image pipeline
     img_count = 0
-    if "images" not in want:
-        pass
-    else:
+    if "images" in want:
         for img_url in find_image_urls(soup, url):
             if limit_images is not None and img_count >= limit_images:
                 break
@@ -140,10 +136,11 @@ def _scrape_page(
             if ct and not ct.startswith("image/"):
                 best_url = img_url
                 ct, content_length = fetcher.head_metadata(img_url, delay=delay)
-            if min_image_size is not None and content_length is not None and content_length < min_image_size:
-                continue
-            if max_image_size is not None and content_length is not None and content_length > max_image_size:
-                continue
+            if content_length is not None:
+                if min_image_size is not None and content_length < min_image_size:
+                    continue
+                if max_image_size is not None and content_length > max_image_size:
+                    continue
             dest = path_for_image(out_dir, domain, best_url, ct)
             if dest.exists():
                 urls_map[img_url] = str(dest)
@@ -232,18 +229,19 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     limit = args.limit
     types_set = set(args.types) if args.types else None
-    min_image_size = None
-    max_image_size = None
-    if args.min_image_size:
+    min_image_size: int | None = None
+    max_image_size: int | None = None
+    for opt, val in (("--min-image-size", args.min_image_size), ("--max-image-size", args.max_image_size)):
+        if not val:
+            continue
         try:
-            min_image_size = _parse_size(args.min_image_size)
+            parsed = _parse_size(val)
+            if "min" in opt:
+                min_image_size = parsed
+            else:
+                max_image_size = parsed
         except ValueError as e:
-            parser.error(f"--min-image-size: {e}")
-    if args.max_image_size:
-        try:
-            max_image_size = _parse_size(args.max_image_size)
-        except ValueError as e:
-            parser.error(f"--max-image-size: {e}")
+            parser.error(f"{opt}: {e}")
     workers = args.workers if args.workers is not None else default_workers()
     workers = max(1, min(workers, default_workers()))
 
