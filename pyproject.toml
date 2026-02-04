@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "basic-scraper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Basic scraper: PDFs, text, and images from websites at high quality, stored locally."
 readme = "README.md"
 license = { text = "MIT" }
