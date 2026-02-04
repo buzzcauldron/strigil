@@ -62,15 +62,20 @@ def _ensure_unique(path: Path) -> Path:
         n += 1
 
 
+def _path_for_pdf_base(out_dir: Path, domain: str, url: str) -> Path:
+    """Canonical path for a PDF (no suffix); use for skip-if-exists check."""
+    base = sanitize_basename(url, "pdf")
+    return out_dir / domain / "pdfs" / base
+
+
 def path_for_pdf(out_dir: Path, domain: str, url: str) -> Path:
     """Return full path for a PDF file."""
-    base = sanitize_basename(url, "pdf")
-    p = out_dir / domain / "pdfs" / base
+    p = _path_for_pdf_base(out_dir, domain, url)
     return _ensure_unique(p)
 
 
-def path_for_image(out_dir: Path, domain: str, url: str, content_type: str | None = None) -> Path:
-    """Return full path for an image. Infer extension from URL or Content-Type."""
+def _path_for_image_base(out_dir: Path, domain: str, url: str, content_type: str | None = None) -> Path:
+    """Canonical path for an image (no suffix); use for skip-if-exists check."""
     ext = ""
     if content_type:
         m = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/svg+xml": "svg"}
@@ -86,15 +91,25 @@ def path_for_image(out_dir: Path, domain: str, url: str, content_type: str | Non
     base = sanitize_basename(url, ext)
     if not base.lower().endswith(f".{ext}"):
         base = f"{base}.{ext}" if "." not in base else base
-    p = out_dir / domain / "images" / base
+    return out_dir / domain / "images" / base
+
+
+def path_for_image(out_dir: Path, domain: str, url: str, content_type: str | None = None) -> Path:
+    """Return full path for an image. Infer extension from URL or Content-Type."""
+    p = _path_for_image_base(out_dir, domain, url, content_type)
     return _ensure_unique(p)
+
+
+def _path_for_text_base(out_dir: Path, domain: str, url: str) -> Path:
+    """Canonical path for text (no suffix); use for skip-if-exists check."""
+    slug = slug_from_url(url)
+    base = f"{slug}.txt"
+    return out_dir / domain / "texts" / base
 
 
 def path_for_text(out_dir: Path, domain: str, url: str) -> Path:
     """Return full path for extracted text."""
-    slug = slug_from_url(url)
-    base = f"{slug}.txt"
-    p = out_dir / domain / "texts" / base
+    p = _path_for_text_base(out_dir, domain, url)
     return _ensure_unique(p)
 
 
@@ -135,3 +150,31 @@ def url_in_manifest(manifest: dict, url: str, key: str = "urls") -> bool:
     """Check if URL is already recorded (for skip-if-exists)."""
     urls = manifest.get(key, {})
     return url in urls
+
+
+def path_for_pdf_canonical(out_dir: Path, domain: str, url: str) -> Path:
+    """Canonical path for a PDF (no suffix); use for skip-if-exists check."""
+    return _path_for_pdf_base(out_dir, domain, url)
+
+
+def path_for_image_canonical(out_dir: Path, domain: str, url: str, content_type: str | None = None) -> Path:
+    """Canonical path for an image (no suffix); use for skip-if-exists check."""
+    return _path_for_image_base(out_dir, domain, url, content_type)
+
+
+def path_for_text_canonical(out_dir: Path, domain: str, url: str) -> Path:
+    """Canonical path for text (no suffix); use for skip-if-exists check."""
+    return _path_for_text_base(out_dir, domain, url)
+
+
+def path_exists_for_resource(
+    out_dir: Path, domain: str, url: str, kind: str, content_type: str | None = None
+) -> bool:
+    """True if the canonical output path for this URL already exists on disk."""
+    if kind == "pdf":
+        return path_for_pdf_canonical(out_dir, domain, url).exists()
+    if kind == "image":
+        return path_for_image_canonical(out_dir, domain, url, content_type).exists()
+    if kind == "text":
+        return path_for_text_canonical(out_dir, domain, url).exists()
+    return False

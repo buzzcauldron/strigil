@@ -32,7 +32,7 @@ This installs the package in editable mode and registers the `scrape` and `scrap
 scrape --url https://example.com/page [--out-dir output] [--delay 1] [--crawl] [--max-depth 2] [--same-domain-only]
 ```
 
-Filter images by file size (uses HEAD `Content-Length`): `--min-image-size 50k` and/or `--max-image-size 5m` (suffixes `k`/`m` for KB/MB).
+Filter images by file size (uses HEAD `Content-Length`): `--min-image-size 50k` and/or `--max-image-size 5m` (suffixes `k`/`m` for KB/MB). Use a low or zero minimum to capture thumbnails; a high minimum (e.g. `1m`) skips smaller images.
 
 Or open the simple GUI:
 
@@ -74,6 +74,17 @@ For **crawl** mode, the scraper auto-detects CPU count and caps parallel workers
 
 ```bash
 scrape --url https://example.com --crawl --workers 2
+```
+
+### Iterations and auto timeout (single-page)
+
+On 403 or slow responses, the scraper retries automatically:
+
+- **Iterations:** Single-page runs retry up to `--max-iterations` (default 3). Each iteration uses a longer delay and timeout; if the first attempt gets 403, the next iteration automatically uses the browser (`--js`) when Playwright is installed.
+- **Auto timeout:** Per-request timeout scales with each retry (30s → 60s → 120s, cap 120s). Suggested default is 120s max; override base with a custom timeout in code if needed.
+
+```bash
+scrape --url https://strict.site/page --max-iterations 5
 ```
 
 ## Building a standalone bundle

@@ -1,26 +1,18 @@
 """HTTP fetching with retries, streaming, and politeness (User-Agent, timeouts)."""
 
+import random
 import time
 from pathlib import Path
 
 import httpx
 
 
-def _fetch_html_browser(url: str, *, delay: float = 0, timeout_ms: int = 30000) -> tuple[bytes, str]:
-    """Fetch HTML using Playwright (real browser). Use for JS-heavy or bot-protected sites."""
-    if delay > 0:
-        time.sleep(delay)
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            page = browser.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            html = page.content()
-            return html.encode("utf-8"), "utf-8"
-        finally:
-            browser.close()
+def _polite_sleep(delay: float) -> None:
+    """Sleep with ±15% jitter to avoid fixed-interval bot patterns."""
+    if delay <= 0:
+        return
+    jittered = delay * random.uniform(0.85, 1.15)
+    time.sleep(jittered)
 
 # Browser-like UA to reduce 403 from sites that block scrapers
 DEFAULT_USER_AGENT = (
@@ -28,8 +20,9 @@ DEFAULT_USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 DEFAULT_TIMEOUT = 30.0
+MAX_TIMEOUT = 120.0  # auto timeout cap: per-attempt timeout scales up to this
 MAX_RETRIES = 3
-RETRY_BACKOFF = 2.0  # multiplicative factor
+RETRY_BACKOFF = 2.0  # multiplicative factor for delay and timeout scaling
 
 DEFAULT_HEADERS = {
     "User-Agent": DEFAULT_USER_AGENT,
@@ -52,6 +45,12 @@ class Fetcher:
         self._headers = {**DEFAULT_HEADERS, **(headers or {})}
         self._use_browser = use_browser
         self._client: httpx.Client | None = None
+        # Playwright: one context per Fetcher so cookies from first page load apply to assets
+        self._playwright = None
+        self._browser = None
+        self._browser_context = None
+        # Page URL from last fetch_html; sent as Referer on asset requests to reduce 403s
+        self._page_url: str | None = None
 
     def _get_client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
@@ -62,9 +61,42 @@ class Fetcher:
             )
         return self._client
 
+    def _get_browser_context(self):
+        """Lazy-init Playwright browser and context; shared so cookies apply to all requests."""
+        if self._browser_context is not None:
+            return self._browser_context
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as e:
+            raise RuntimeError(
+                "Browser fetch (--js) requires: pip install basic-scraper[js] && playwright install"
+            ) from e
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=True)
+        self._browser_context = self._browser.new_context()
+        return self._browser_context
+
     def close(self) -> None:
         if self._client and not self._client.is_closed:
             self._client.close()
+        if self._browser_context is not None:
+            try:
+                self._browser_context.close()
+            except Exception:
+                pass
+            self._browser_context = None
+        if self._browser is not None:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
 
     def __enter__(self) -> "Fetcher":
         return self
@@ -75,19 +107,43 @@ class Fetcher:
     def fetch_html(self, url: str, *, delay: float = 0) -> tuple[bytes, str]:
         """Fetch HTML; returns (raw_bytes, charset). Uses browser (Playwright) when use_browser=True."""
         if self._use_browser:
-            try:
-                return _fetch_html_browser(url, delay=delay, timeout_ms=int(self._timeout * 1000))
-            except ImportError as e:
-                raise RuntimeError(
-                    "Browser fetch (--js) requires: pip install basic-scraper[js] && playwright install"
-                ) from e
-        if delay > 0:
-            time.sleep(delay)
-        last_exc: BaseException | None = None
+            _polite_sleep(delay)
+            ctx = self._get_browser_context()
+            self._page_url = url
+            last_exc: BaseException | None = None
+            for attempt in range(MAX_RETRIES):
+                attempt_timeout_ms = min(
+                    self._timeout * (RETRY_BACKOFF ** attempt) * 1000,
+                    MAX_TIMEOUT * 1000,
+                )
+                page = ctx.new_page()
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=int(attempt_timeout_ms))
+                    # Brief wait for lazy-loaded images and JS-injected content
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=4000)
+                    except Exception:
+                        time.sleep(1.5)
+                    html = page.content()
+                    return html.encode("utf-8"), "utf-8"
+                except Exception as e:
+                    last_exc = e
+                    if attempt < MAX_RETRIES - 1:
+                        _polite_sleep(RETRY_BACKOFF ** attempt)
+                        continue
+                    raise
+                finally:
+                    page.close()
+        _polite_sleep(delay)
+        last_exc = None
         for attempt in range(MAX_RETRIES):
+            attempt_timeout = min(
+                self._timeout * (RETRY_BACKOFF ** attempt),
+                MAX_TIMEOUT,
+            )
             try:
                 client = self._get_client()
-                resp = client.get(url)
+                resp = client.get(url, timeout=attempt_timeout)
                 resp.raise_for_status()
                 return resp.content, resp.charset_encoding or "utf-8"
             except (httpx.HTTPStatusError, httpx.RequestError) as e:
@@ -95,21 +151,50 @@ class Fetcher:
                 r = getattr(e, "response", None)
                 if r is not None:
                     code = getattr(r, "status_code", None)
-                    if code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_BACKOFF ** attempt)
+                    retryable = code in (403, 429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1
+                    if retryable:
+                        wait = RETRY_BACKOFF ** attempt
+                        if r is not None and code in (403, 429):
+                            ra = (r.headers or {}).get("retry-after", "").strip()
+                            if ra and ra.isdigit():
+                                wait = max(wait, float(ra))
+                        _polite_sleep(wait)
                         continue
                 raise
         raise last_exc  # type: ignore[misc]
 
     def fetch_binary(self, url: str, dest_path: Path, *, timeout: float = 60.0, delay: float = 0) -> bool:
         """Stream download to dest_path. Returns True on success."""
-        if delay > 0:
-            time.sleep(delay)
+        _polite_sleep(delay)
+        if self._use_browser:
+            ctx = self._get_browser_context()
+            headers = {"Referer": self._page_url} if self._page_url else {}
+            for attempt in range(MAX_RETRIES):
+                attempt_timeout_ms = min(
+                    timeout * (RETRY_BACKOFF ** attempt) * 1000,
+                    MAX_TIMEOUT * 1000,
+                )
+                resp = ctx.request.get(url, timeout=attempt_timeout_ms, headers=headers or None)
+                if resp.ok:
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    dest_path.write_bytes(resp.body())
+                    return True
+                if resp.status == 403 and attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF ** attempt
+                    ra = (resp.headers or {}).get("retry-after", "").strip()
+                    if ra and ra.isdigit():
+                        wait = max(wait, float(ra))
+                    _polite_sleep(wait)
+                    continue
+                raise RuntimeError(
+                    f"Client error '{resp.status} {resp.status_text}' for url '{url}'"
+                )
         last_exc: BaseException | None = None
         for attempt in range(MAX_RETRIES):
+            attempt_timeout = min(timeout * (RETRY_BACKOFF ** attempt), MAX_TIMEOUT)
             try:
                 client = self._get_client()
-                with client.stream("GET", url, timeout=timeout) as resp:
+                with client.stream("GET", url, timeout=attempt_timeout) as resp:
                     resp.raise_for_status()
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(dest_path, "wb") as f:
@@ -121,19 +206,39 @@ class Fetcher:
                 r = getattr(e, "response", None)
                 if r is not None:
                     code = getattr(r, "status_code", None)
-                    if code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_BACKOFF ** attempt)
+                    retryable = code in (403, 429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1
+                    if retryable:
+                        wait = RETRY_BACKOFF ** attempt
+                        if r is not None and code in (403, 429):
+                            ra = (r.headers or {}).get("retry-after", "").strip()
+                            if ra and ra.isdigit():
+                                wait = max(wait, float(ra))
+                        _polite_sleep(wait)
                         continue
                 raise
         raise last_exc  # type: ignore[misc]
 
     def head_metadata(self, url: str, *, timeout: float = 10.0, delay: float = 0) -> tuple[str | None, int | None]:
         """HEAD request; returns (content_type, content_length). content_length is None if header missing."""
-        if delay > 0:
-            time.sleep(delay)
+        _polite_sleep(delay)
+        head_timeout = min(timeout, MAX_TIMEOUT)
+        if self._use_browser:
+            try:
+                ctx = self._get_browser_context()
+                headers = {"Referer": self._page_url} if self._page_url else {}
+                resp = ctx.request.head(url, timeout=head_timeout * 1000, headers=headers or None)
+                if not resp.ok:
+                    return None, None
+                ct = resp.headers.get("content-type", "")
+                content_type = ct.split(";")[0].strip().lower() if ct else None
+                cl = resp.headers.get("content-length")
+                content_length = int(cl) if cl is not None and cl.isdigit() else None
+                return content_type, content_length
+            except Exception:
+                return None, None
         try:
             client = self._get_client()
-            resp = client.head(url, timeout=timeout)
+            resp = client.head(url, timeout=head_timeout)
             resp.raise_for_status()
             ct = resp.headers.get("content-type", "")
             content_type = ct.split(";")[0].strip().lower() if ct else None

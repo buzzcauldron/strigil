@@ -10,5 +10,6 @@ build/
 venv/
 env/
 output/
+output_*/
 *.log
 .DS_Store

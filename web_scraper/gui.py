@@ -2,13 +2,39 @@
 
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
+from pathlib import Path
+
 import tkinter as tk
 from tkinter import ttk
 
 from web_scraper._deps import check_required, ensure_optional
+
+LAST_URL_FILE = Path.home() / ".basic-scraper" / "last_url.txt"
+
+
+def _load_last_url() -> str:
+    """Return last used URL or default."""
+    try:
+        if LAST_URL_FILE.exists():
+            return LAST_URL_FILE.read_text(encoding="utf-8").strip() or "https://example.com"
+    except OSError:
+        pass
+    return "https://example.com"
+
+
+def _save_last_url(url: str) -> None:
+    """Persist URL for next launch."""
+    if not url or not url.strip():
+        return
+    try:
+        LAST_URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_URL_FILE.write_text(url.strip(), encoding="utf-8")
+    except OSError:
+        pass
 
 # Image size presets (bytes): Small < 100 KB, Medium 100 KB–1 MB, Large > 1 MB
 SIZE_SMALL_MAX = 100 * 1024
@@ -45,7 +71,7 @@ def main() -> None:
     main_frame.pack(fill=tk.BOTH, expand=True)
 
     ttk.Label(main_frame, text="URL").grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
-    url_var = tk.StringVar(value="https://example.com")
+    url_var = tk.StringVar(value=_load_last_url())
     url_entry = ttk.Entry(main_frame, textvariable=url_var, width=50)
     url_entry.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
 
@@ -69,7 +95,7 @@ def main() -> None:
         size_small_var.set(False)
         size_medium_var.set(True)
         size_large_var.set(True)
-        delay_var.set(1.0)
+        delay_var.set(0.5)
         crawl_var.set(True)
         depth_var.set(2)
         same_domain_var.set(True)
@@ -102,12 +128,16 @@ def main() -> None:
 
     opts_frame = ttk.Frame(main_frame)
     opts_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
-    delay_var = tk.DoubleVar(value=1.0)
+    delay_var = tk.DoubleVar(value=0.5)
     ttk.Label(opts_frame, text="Delay (s):").pack(side=tk.LEFT)
     delay_spin = ttk.Spinbox(opts_frame, from_=0.5, to=10, increment=0.5, width=5, textvariable=delay_var)
     delay_spin.pack(side=tk.LEFT, padx=(4, 12))
-    crawl_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(opts_frame, text="Crawl links", variable=crawl_var).pack(side=tk.LEFT, padx=(0, 8))
+    crawl_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(
+        opts_frame,
+        text="Follow links (crawl subtrees for images)",
+        variable=crawl_var,
+    ).pack(side=tk.LEFT, padx=(0, 8))
     depth_var = tk.IntVar(value=2)
     ttk.Label(opts_frame, text="Max depth:").pack(side=tk.LEFT, padx=(8, 0))
     depth_spin = ttk.Spinbox(opts_frame, from_=1, to=10, width=3, textvariable=depth_var)
@@ -138,18 +168,64 @@ def main() -> None:
         log_text.delete("1.0", tk.END)
         log_text.config(state=tk.DISABLED)
 
-    output_queue: queue.Queue[str | None] = queue.Queue()
+    # Status bar: scanning + scraping
+    status_frame = ttk.Frame(main_frame)
+    status_frame.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
+    main_frame.columnconfigure(0, weight=1)
+    scan_status_var = tk.StringVar(value="")
+    scrape_status_var = tk.StringVar(value="")
+    ttk.Label(status_frame, text="Scan:").pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Label(status_frame, textvariable=scan_status_var).pack(side=tk.LEFT, padx=(0, 16))
+    ttk.Label(status_frame, text="Scrape:").pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Label(status_frame, textvariable=scrape_status_var).pack(side=tk.LEFT)
 
-    def run_scrape(scrape_btn_ref: tk.Widget) -> None:
+    output_queue: queue.Queue[str | None] = queue.Queue()
+    current_proc: list[subprocess.Popen | None] = [None]
+
+    def run_scrape(scrape_btn_ref: tk.Widget, stop_btn_ref: tk.Widget) -> None:
         url = url_var.get().strip()
         if not url:
             append_log("Error: URL is required.\n")
             return
+        _save_last_url(url)
         scrape_btn_ref.config(state=tk.DISABLED)
+        scan_status_var.set("Scanning resources...")
+        scrape_status_var.set("—")
+        scrape_counts: list[int] = [0, 0, 0]  # pdf, text, images
+
+        def update_status(line: str) -> None:
+            if "Running:" in line or "Scrape:" in line or "Iteration" in line:
+                scan_status_var.set("Scanning resources...")
+            elif "Found:" in line:
+                scan_status_var.set("Mapping complete")
+            elif "→ Downloading" in line:
+                scan_status_var.set("Downloading assets...")
+            elif "  [" in line and "/" in line and "] " in line:
+                # Parse [3/12] style progress
+                scan_status_var.set("Downloading assets...")
+                m = re.search(r"\[(\d+)/(\d+)\]", line)
+                if m:
+                    scrape_status_var.set(f"{m.group(1)}/{m.group(2)} assets")
+            elif "  Text:" in line:
+                scrape_counts[1] += 1
+                scan_status_var.set("Page loaded")
+                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+            elif "  Image:" in line:
+                scrape_counts[2] += 1
+                scan_status_var.set("Page loaded")
+                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+            elif "  PDF:" in line:
+                scrape_counts[0] += 1
+                scan_status_var.set("Page loaded")
+                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+            elif "Done." in line:
+                scan_status_var.set("Complete")
+                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+
         try:
             delay = float(delay_var.get())
         except (ValueError, tk.TclError):
-            delay = 1.0
+            delay = 0.5
         try:
             depth = int(depth_var.get())
         except (ValueError, tk.TclError):
@@ -227,11 +303,14 @@ def main() -> None:
                     text=True,
                     bufsize=1,
                 )
+                current_proc[0] = proc
                 if proc.stdout:
                     for line in proc.stdout:
                         output_queue.put(line)
             except Exception as e:
                 output_queue.put(f"Error: {e}\n")
+            finally:
+                current_proc[0] = None
             output_queue.put(None)
 
         def poll_queue(btn: tk.Widget) -> None:
@@ -242,22 +321,35 @@ def main() -> None:
                     if line is None:
                         saw_done = True
                         break
-                    root.after(0, lambda l=line: append_log(l))
+                    root.after(0, lambda l=line: (append_log(l), update_status(l)))
             except queue.Empty:
                 pass
             if saw_done:
-                root.after(0, lambda: btn.config(state=tk.NORMAL))
+                root.after(0, lambda: (stop_btn_ref.config(state=tk.DISABLED), btn.config(state=tk.NORMAL)))
             else:
-                root.after(100, lambda: poll_queue(btn))
+                root.after(150, lambda: poll_queue(btn))
 
         append_log(f"Running: {' '.join(cmd)}\n\n")
+        stop_btn.config(state=tk.NORMAL)
         threading.Thread(target=worker, daemon=True).start()
         poll_queue(scrape_btn_ref)
 
     btn_frame = ttk.Frame(main_frame)
-    btn_frame.grid(row=9, column=0, columnspan=2)
-    scrape_btn = ttk.Button(btn_frame, text="Scrape", command=lambda: run_scrape(scrape_btn))
+    btn_frame.grid(row=10, column=0, columnspan=2)
+
+    def do_stop() -> None:
+        if current_proc[0] is not None:
+            try:
+                current_proc[0].terminate()
+            except Exception:
+                pass
+            output_queue.put(None)
+
+    scrape_btn = ttk.Button(btn_frame, text="Scrape")
+    stop_btn = ttk.Button(btn_frame, text="Stop", command=do_stop, state=tk.DISABLED)
+    scrape_btn.config(command=lambda: run_scrape(scrape_btn, stop_btn))
     scrape_btn.pack(side=tk.LEFT, padx=(0, 8))
+    stop_btn.pack(side=tk.LEFT, padx=(0, 8))
     ttk.Button(btn_frame, text="Clear log", command=clear_log).pack(side=tk.LEFT)
 
     root.mainloop()
