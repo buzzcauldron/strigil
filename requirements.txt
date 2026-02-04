@@ -1,0 +1,7 @@
+httpx>=0.27.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+readability-lxml>=0.8.0
+
+# Optional: playwright (for JS-heavy sites)
+# pip install playwright && playwright install
