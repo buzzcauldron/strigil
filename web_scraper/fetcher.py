@@ -85,19 +85,6 @@ class Fetcher:
                 raise
         raise last_exc  # type: ignore[misc]
 
-    def head_content_type(self, url: str, *, timeout: float = 10.0, delay: float = 0) -> str | None:
-        """HEAD request to get Content-Type. Returns None on failure."""
-        if delay > 0:
-            time.sleep(delay)
-        try:
-            client = self._get_client()
-            resp = client.head(url, timeout=timeout)
-            resp.raise_for_status()
-            ct = resp.headers.get("content-type", "")
-            return ct.split(";")[0].strip().lower() if ct else None
-        except Exception:
-            return None
-
     def head_metadata(self, url: str, *, timeout: float = 10.0, delay: float = 0) -> tuple[str | None, int | None]:
         """HEAD request; returns (content_type, content_length). content_length is None if header missing."""
         if delay > 0:
@@ -113,6 +100,11 @@ class Fetcher:
             return content_type, content_length
         except Exception:
             return None, None
+
+    def head_content_type(self, url: str, *, timeout: float = 10.0, delay: float = 0) -> str | None:
+        """HEAD request to get Content-Type. Returns None on failure."""
+        ct, _ = self.head_metadata(url, timeout=timeout, delay=delay)
+        return ct
 
 
 def fetch_html(url: str, *, timeout: float = DEFAULT_TIMEOUT, delay: float = 0) -> tuple[bytes, str]:
