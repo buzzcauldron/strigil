@@ -30,8 +30,17 @@ def main() -> None:
     out_entry = ttk.Entry(main_frame, textvariable=out_var, width=50)
     out_entry.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
 
+    types_frame = ttk.LabelFrame(main_frame, text="File types")
+    types_frame.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    type_pdf_var = tk.BooleanVar(value=True)
+    type_text_var = tk.BooleanVar(value=True)
+    type_images_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(types_frame, text="PDF", variable=type_pdf_var).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Checkbutton(types_frame, text="Text", variable=type_text_var).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Checkbutton(types_frame, text="Images", variable=type_images_var).pack(side=tk.LEFT)
+
     opts_frame = ttk.Frame(main_frame)
-    opts_frame.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    opts_frame.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
     delay_var = tk.DoubleVar(value=1.0)
     ttk.Label(opts_frame, text="Delay (s):").pack(side=tk.LEFT)
     delay_spin = ttk.Spinbox(opts_frame, from_=0.5, to=10, increment=0.5, width=5, textvariable=delay_var)
@@ -46,9 +55,9 @@ def main() -> None:
     ttk.Checkbutton(opts_frame, text="Same domain only", variable=same_domain_var).pack(side=tk.LEFT)
 
     log_frame = ttk.LabelFrame(main_frame, text="Log")
-    log_frame.grid(row=5, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+    log_frame.grid(row=6, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
     main_frame.columnconfigure(0, weight=1)
-    main_frame.rowconfigure(5, weight=1)
+    main_frame.rowconfigure(6, weight=1)
 
     log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
     log_scroll = ttk.Scrollbar(log_frame)
@@ -65,16 +74,12 @@ def main() -> None:
 
     output_queue: queue.Queue[str | None] = queue.Queue()
 
-    btn_frame = ttk.Frame(main_frame)
-    btn_frame.grid(row=6, column=0, columnspan=2)
-    scrape_btn = ttk.Button(btn_frame, text="Scrape", command=run_scrape)
-
-    def run_scrape() -> None:
+    def run_scrape(scrape_btn_ref: tk.Widget) -> None:
         url = url_var.get().strip()
         if not url:
             append_log("Error: URL is required.\n")
             return
-        scrape_btn.config(state=tk.DISABLED)
+        scrape_btn_ref.config(state=tk.DISABLED)
         try:
             delay = float(delay_var.get())
         except (ValueError, tk.TclError):
@@ -103,6 +108,20 @@ def main() -> None:
             "--out-dir", out_var.get().strip() or "output",
             "--delay", str(delay),
         ])
+        selected_types = []
+        if type_pdf_var.get():
+            selected_types.append("pdf")
+        if type_text_var.get():
+            selected_types.append("text")
+        if type_images_var.get():
+            selected_types.append("images")
+        if selected_types and len(selected_types) < 3:
+            cmd.append("--types")
+            cmd.extend(selected_types)
+        elif not selected_types:
+            append_log("Error: Select at least one file type.\n")
+            scrape_btn_ref.config(state=tk.NORMAL)
+            return
         if crawl_var.get():
             cmd.extend(["--crawl", "--max-depth", str(depth)])
             if same_domain_var.get():
@@ -124,7 +143,7 @@ def main() -> None:
                 output_queue.put(f"Error: {e}\n")
             output_queue.put(None)
 
-        def poll_queue() -> None:
+        def poll_queue(btn: tk.Widget) -> None:
             saw_done = False
             try:
                 while True:
@@ -136,14 +155,17 @@ def main() -> None:
             except queue.Empty:
                 pass
             if saw_done:
-                root.after(0, lambda: scrape_btn.config(state=tk.NORMAL))
+                root.after(0, lambda: btn.config(state=tk.NORMAL))
             else:
-                root.after(100, poll_queue)
+                root.after(100, lambda: poll_queue(btn))
 
         append_log(f"Running: {' '.join(cmd)}\n\n")
         threading.Thread(target=worker, daemon=True).start()
-        poll_queue()
+        poll_queue(scrape_btn_ref)
 
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.grid(row=7, column=0, columnspan=2)
+    scrape_btn = ttk.Button(btn_frame, text="Scrape", command=lambda: run_scrape(scrape_btn))
     scrape_btn.pack(side=tk.LEFT, padx=(0, 8))
     ttk.Button(btn_frame, text="Clear log", command=lambda: (log_text.config(state=tk.NORMAL), log_text.delete("1.0", tk.END), log_text.config(state=tk.DISABLED))).pack(side=tk.LEFT)
 

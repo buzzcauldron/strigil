@@ -43,14 +43,34 @@ pip install -e ".[js]"
 playwright install
 ```
 
+Optional: install tqdm for a progress bar (per-page in crawl, per-asset on single page):
+
+```bash
+pip install -e ".[progress]"
+```
+
+Use `--no-progress` to disable the bar (e.g. in scripts).
+
 ### If dependencies are missing
 
-When you run `scrape` or `scrape-gui`, the app checks that required dependencies (httpx, beautifulsoup4, lxml, readability-lxml) are installed. If any are missing, it prints install instructions and exits:
+When you run `scrape` or `scrape-gui`, the app checks that required dependencies (httpx, beautifulsoup4, lxml) are installed. If any are missing, it prints install instructions and exits.
 
 - **From PyPI:** `pip install basic-scraper`
 - **From source:** `pip install -e .` (in the project directory)
+- **Auto-install:** set the env var and re-run; the app will run `pip install` for you and exit—run the command again after that:
+  ```bash
+  BASIC_SCRAPER_AUTO_INSTALL_DEPS=1 scrape --url https://example.com
+  ```
 
 An optional one-line hint is shown if Playwright is not installed (for JS rendering).
+
+### Workers and hardware autodetect
+
+For **crawl** mode, the scraper auto-detects CPU count and caps parallel workers (default: up to 4) for effective scraping while staying light. Override with `--workers N`:
+
+```bash
+scrape --url https://example.com --crawl --workers 2
+```
 
 ## Building a standalone bundle
 
@@ -62,3 +82,23 @@ pyinstaller basic-scraper.spec
 ```
 
 Output is in `dist/basic-scraper/`: run `scrape` or `scrape-gui` from that folder. The GUI uses the bundled `scrape` executable in the same directory when you click Scrape.
+
+## Docker
+
+Light image (CLI only, no GUI):
+
+```bash
+docker build -t basic-scraper .
+docker run --rm -v "$(pwd)/output:/scrape/output" basic-scraper --url https://example.com --out-dir /scrape/output
+```
+
+Override the default URL and options by passing args after the image name.
+
+## CI: build all OS and Docker
+
+On push/PR to `main` or `master`, GitHub Actions:
+
+- Builds PyInstaller bundles on **Ubuntu, macOS, and Windows** and uploads artifacts (`basic-scraper-<os>`).
+- Builds the **Docker** image and runs a quick smoke test.
+
+See [.github/workflows/build.yml](.github/workflows/build.yml).

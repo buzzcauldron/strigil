@@ -11,3 +11,4 @@ venv/
 env/
 output/
 *.log
+.DS_Store

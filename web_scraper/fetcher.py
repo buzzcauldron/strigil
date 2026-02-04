@@ -11,91 +11,107 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0  # multiplicative factor
 
 
-def _get_client(timeout: float = DEFAULT_TIMEOUT) -> httpx.Client:
-    return httpx.Client(
-        follow_redirects=True,
-        timeout=timeout,
-        headers={"User-Agent": USER_AGENT},
-    )
+class Fetcher:
+    """HTTP fetcher with connection pooling. Reuse for multiple requests."""
 
+    def __init__(self, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+        self._timeout = timeout
+        self._client: httpx.Client | None = None
 
-def fetch_html(url: str, *, timeout: float = DEFAULT_TIMEOUT, delay: float = 0) -> tuple[bytes, str]:
-    """
-    Fetch HTML at URL, respecting Content-Type and charset.
-    Returns (raw_bytes, encoding_str). Uses retries with backoff for 5xx/429.
-    """
-    if delay > 0:
-        time.sleep(delay)
+    def _get_client(self) -> httpx.Client:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(
+                follow_redirects=True,
+                timeout=self._timeout,
+                headers={"User-Agent": USER_AGENT},
+            )
+        return self._client
 
-    last_exc: BaseException | None = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            with _get_client(timeout=timeout) as client:
+    def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            self._client.close()
+
+    def __enter__(self) -> "Fetcher":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def fetch_html(self, url: str, *, delay: float = 0) -> tuple[bytes, str]:
+        """Fetch HTML; returns (raw_bytes, charset)."""
+        if delay > 0:
+            time.sleep(delay)
+        last_exc: BaseException | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                client = self._get_client()
                 resp = client.get(url)
                 resp.raise_for_status()
-                content = resp.content
-                charset = resp.charset_encoding or "utf-8"
-                return content, charset
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            last_exc = e
-            status = getattr(e, "response", None)
-            if status is not None:
-                code = getattr(status, "status_code", None)
-                if code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1:
-                    wait = RETRY_BACKOFF ** attempt
-                    time.sleep(wait)
-                    continue
-            raise
-    raise last_exc  # type: ignore[misc]
+                return resp.content, resp.charset_encoding or "utf-8"
+            except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                last_exc = e
+                r = getattr(e, "response", None)
+                if r is not None:
+                    code = getattr(r, "status_code", None)
+                    if code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_BACKOFF ** attempt)
+                        continue
+                raise
+        raise last_exc  # type: ignore[misc]
 
-
-def fetch_binary(
-    url: str,
-    dest_path: Path,
-    *,
-    timeout: float = 60.0,
-    delay: float = 0,
-) -> bool:
-    """
-    Download URL to dest_path. Streams for large files. Returns True if written.
-    Uses retries with backoff for 5xx/429.
-    """
-    if delay > 0:
-        time.sleep(delay)
-
-    last_exc: BaseException | None = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            with _get_client(timeout=timeout) as client:
-                with client.stream("GET", url) as resp:
+    def fetch_binary(self, url: str, dest_path: Path, *, timeout: float = 60.0, delay: float = 0) -> bool:
+        """Stream download to dest_path. Returns True on success."""
+        if delay > 0:
+            time.sleep(delay)
+        last_exc: BaseException | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                client = self._get_client()
+                with client.stream("GET", url, timeout=timeout) as resp:
                     resp.raise_for_status()
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(dest_path, "wb") as f:
                         for chunk in resp.iter_bytes(chunk_size=65536):
                             f.write(chunk)
-                    return True
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
-            last_exc = e
-            response = getattr(e, "response", None)
-            if response is not None:
-                code = getattr(response, "status_code", None)
-                if code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1:
-                    wait = RETRY_BACKOFF ** attempt
-                    time.sleep(wait)
-                    continue
-            raise
-    raise last_exc  # type: ignore[misc]
+                return True
+            except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                last_exc = e
+                r = getattr(e, "response", None)
+                if r is not None:
+                    code = getattr(r, "status_code", None)
+                    if code in (429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_BACKOFF ** attempt)
+                        continue
+                raise
+        raise last_exc  # type: ignore[misc]
 
-
-def head_content_type(url: str, *, timeout: float = 10.0, delay: float = 0) -> str | None:
-    """HEAD request to get Content-Type. Returns None on failure."""
-    if delay > 0:
-        time.sleep(delay)
-    try:
-        with _get_client(timeout=timeout) as client:
-            resp = client.head(url)
+    def head_content_type(self, url: str, *, timeout: float = 10.0, delay: float = 0) -> str | None:
+        """HEAD request to get Content-Type. Returns None on failure."""
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            client = self._get_client()
+            resp = client.head(url, timeout=timeout)
             resp.raise_for_status()
             ct = resp.headers.get("content-type", "")
             return ct.split(";")[0].strip().lower() if ct else None
-    except Exception:
-        return None
+        except Exception:
+            return None
+
+
+def fetch_html(url: str, *, timeout: float = DEFAULT_TIMEOUT, delay: float = 0) -> tuple[bytes, str]:
+    """Standalone fetch (creates temporary client). Prefer Fetcher for multiple requests."""
+    with Fetcher(timeout=timeout) as f:
+        return f.fetch_html(url, delay=delay)
+
+
+def fetch_binary(url: str, dest_path: Path, *, timeout: float = 60.0, delay: float = 0) -> bool:
+    """Standalone fetch. Prefer Fetcher for multiple requests."""
+    with Fetcher(timeout=timeout) as f:
+        return f.fetch_binary(url, dest_path, timeout=timeout, delay=delay)
+
+
+def head_content_type(url: str, *, timeout: float = 10.0, delay: float = 0) -> str | None:
+    """Standalone HEAD. Prefer Fetcher for multiple requests."""
+    with Fetcher(timeout=timeout) as f:
+        return f.head_content_type(url, timeout=timeout, delay=delay)

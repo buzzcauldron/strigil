@@ -166,10 +166,11 @@ def extract_text(soup: BeautifulSoup, raw_html: str | bytes = "") -> str:
             return _normalize_text(text)
     except ImportError:
         pass
-    # Fallback: main/article content, strip script/style
-    for tag in soup.find_all(["script", "style", "nav", "header", "footer", "aside"]):
+    # Fallback: main/article content, strip script/style (use copy to avoid mutating caller's soup)
+    soup_copy = BeautifulSoup(str(soup), "lxml")
+    for tag in soup_copy.find_all(["script", "style", "nav", "header", "footer", "aside"]):
         tag.decompose()
-    main = soup.find(["main", "article"]) or soup.find("body") or soup
+    main = soup_copy.find(["main", "article"]) or soup_copy.find("body") or soup_copy
     text = main.get_text(separator="\n", strip=True) if main else ""
     return _normalize_text(text)
 

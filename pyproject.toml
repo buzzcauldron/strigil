@@ -20,6 +20,7 @@ dependencies = [
 readability = ["readability-lxml"]
 js = ["playwright"]
 bundle = ["pyinstaller>=6.0"]
+progress = ["tqdm"]
 
 [project.scripts]
 scrape = "web_scraper.cli:main"
