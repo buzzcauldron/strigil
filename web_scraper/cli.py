@@ -17,7 +17,7 @@ try:
 except ImportError:
     tqdm = None
 
-from web_scraper._deps import check_required, optional_hint
+from web_scraper._deps import check_required, ensure_optional, optional_hint
 from web_scraper.extractors import (
     find_image_urls,
     find_page_links,
@@ -175,6 +175,7 @@ def _scrape_page(
 
 def main() -> None:
     check_required()
+    ensure_optional()
     hint = optional_hint()
     if hint:
         print(hint, file=sys.stderr)
@@ -224,6 +225,11 @@ def main() -> None:
         metavar="SIZE",
         help="Skip images larger than SIZE (e.g. 5m, 10m). Uses HEAD Content-Length.",
     )
+    parser.add_argument(
+        "--js",
+        action="store_true",
+        help="Fetch HTML with a real browser (Playwright). Use for JS-heavy or bot-protected sites.",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -250,7 +256,7 @@ def main() -> None:
         _crawl_parallel(
             args.url, out_dir, args.delay, args.max_depth,
             args.same_domain_only, limit, types_set, workers, use_progress,
-            min_image_size, max_image_size,
+            min_image_size, max_image_size, use_browser=args.js,
         )
     else:
         _run_single_or_sequential_crawl(
@@ -272,7 +278,7 @@ def _run_single_or_sequential_crawl(
     max_image_size: int | None,
 ) -> None:
     """Single-page scrape or sequential crawl (workers=1)."""
-    with Fetcher() as fetcher:
+    with Fetcher(use_browser=args.js) as fetcher:
         if args.crawl:
             pbar = tqdm(desc="Crawl", unit="page", file=sys.stderr, disable=not use_progress)
             start_domain = urlparse(args.url).netloc
@@ -346,6 +352,8 @@ def _crawl_parallel(
     use_progress: bool,
     min_image_size: int | None,
     max_image_size: int | None,
+    *,
+    use_browser: bool = False,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -360,7 +368,7 @@ def _crawl_parallel(
     def process_one(url: str, depth: int) -> list[str]:
         if not can_fetch(url):
             return []
-        with Fetcher() as fetcher:
+        with Fetcher(use_browser=use_browser) as fetcher:
             domain = sanitize_domain(url)
             with manifest_lock:
                 manifest = load_manifest(manifest_path(out_dir, domain))

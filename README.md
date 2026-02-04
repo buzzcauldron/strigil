@@ -61,7 +61,7 @@ When you run `scrape` or `scrape-gui`, the app checks that required dependencies
 
 - **From PyPI:** `pip install basic-scraper`
 - **From source:** `pip install -e .` (in the project directory)
-- **Auto-install:** set the env var and re-run; the app will run `pip install` for you and exit—run the command again after that:
+- **Auto-install:** set the env var and re-run; the app will run `pip install` for required deps and exit—run the command again after that. On subsequent runs, if the var is set, missing optional deps (Playwright, tqdm, readability-lxml) are installed automatically and the app continues:
   ```bash
   BASIC_SCRAPER_AUTO_INSTALL_DEPS=1 scrape --url https://example.com
   ```

@@ -5,17 +5,52 @@ from pathlib import Path
 
 import httpx
 
-USER_AGENT = "WebScraper/1.0 (+https://github.com/; high-quality PDF/text/image scraper)"
+
+def _fetch_html_browser(url: str, *, delay: float = 0, timeout_ms: int = 30000) -> tuple[bytes, str]:
+    """Fetch HTML using Playwright (real browser). Use for JS-heavy or bot-protected sites."""
+    if delay > 0:
+        time.sleep(delay)
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            html = page.content()
+            return html.encode("utf-8"), "utf-8"
+        finally:
+            browser.close()
+
+# Browser-like UA to reduce 403 from sites that block scrapers
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 DEFAULT_TIMEOUT = 30.0
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2.0  # multiplicative factor
+
+DEFAULT_HEADERS = {
+    "User-Agent": DEFAULT_USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 class Fetcher:
     """HTTP fetcher with connection pooling. Reuse for multiple requests."""
 
-    def __init__(self, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        headers: dict[str, str] | None = None,
+        use_browser: bool = False,
+    ) -> None:
         self._timeout = timeout
+        self._headers = {**DEFAULT_HEADERS, **(headers or {})}
+        self._use_browser = use_browser
         self._client: httpx.Client | None = None
 
     def _get_client(self) -> httpx.Client:
@@ -23,7 +58,7 @@ class Fetcher:
             self._client = httpx.Client(
                 follow_redirects=True,
                 timeout=self._timeout,
-                headers={"User-Agent": USER_AGENT},
+                headers=self._headers,
             )
         return self._client
 
@@ -38,7 +73,14 @@ class Fetcher:
         self.close()
 
     def fetch_html(self, url: str, *, delay: float = 0) -> tuple[bytes, str]:
-        """Fetch HTML; returns (raw_bytes, charset)."""
+        """Fetch HTML; returns (raw_bytes, charset). Uses browser (Playwright) when use_browser=True."""
+        if self._use_browser:
+            try:
+                return _fetch_html_browser(url, delay=delay, timeout_ms=int(self._timeout * 1000))
+            except ImportError as e:
+                raise RuntimeError(
+                    "Browser fetch (--js) requires: pip install basic-scraper[js] && playwright install"
+                ) from e
         if delay > 0:
             time.sleep(delay)
         last_exc: BaseException | None = None

@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
-from web_scraper._deps import check_required
+from web_scraper._deps import check_required, ensure_optional
 
 # Image size presets (bytes): Small < 100 KB, Medium 100 KB–1 MB, Large > 1 MB
 SIZE_SMALL_MAX = 100 * 1024
@@ -36,6 +36,7 @@ def _open_folder(path: str) -> None:
 
 def main() -> None:
     check_required()
+    ensure_optional()
     root = tk.Tk()
     root.title("Basic Scraper")
     root.minsize(400, 320)

@@ -12,13 +12,16 @@ REQUIRED = [
     ("lxml", "lxml"),
 ]
 
+# (import_name, pip_package_name); order preserved for install
 OPTIONAL = [
     ("playwright", "playwright"),
+    ("tqdm", "tqdm"),
+    ("readability", "readability-lxml"),
 ]
 
 INSTALL_CMD = "pip install basic-scraper"
 INSTALL_CMD_SOURCE = "pip install -e ."
-OPTIONAL_EXTRAS = "pip install basic-scraper[js]"
+OPTIONAL_EXTRAS = "pip install basic-scraper[js,progress,readability]"
 
 
 def _import(name: str) -> bool:
@@ -65,9 +68,39 @@ def check_required() -> bool:
     sys.exit(1)
 
 
+def _try_auto_install_optional() -> None:
+    """If AUTO_INSTALL_ENV is set, install any missing optional deps and continue (no exit)."""
+    if os.environ.get(AUTO_INSTALL_ENV, "").lower() not in ("1", "true", "yes"):
+        return
+    missing = [pip_name for mod_name, pip_name in OPTIONAL if not _import(mod_name)]
+    if not missing:
+        return
+    print("Auto-installing optional dependencies...", file=sys.stderr)
+    cmd = [sys.executable, "-m", "pip", "install", "-q"] + missing
+    try:
+        subprocess.run(cmd, check=True)
+        # If we installed playwright, install browser binaries
+        if "playwright" in missing:
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install"],
+                    capture_output=True,
+                    timeout=300,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+                print("Playwright browsers: run 'playwright install' if you need JS rendering.", file=sys.stderr)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Auto-install optional failed: {e}. Install manually: {OPTIONAL_EXTRAS}", file=sys.stderr)
+
+
+def ensure_optional() -> None:
+    """If AUTO_INSTALL_ENV is set, install any missing optional deps (no exit). Call after check_required()."""
+    _try_auto_install_optional()
+
+
 def optional_hint() -> str | None:
     """Return a one-line hint if any optional deps are missing, else None."""
     missing = [pip_name for mod_name, pip_name in OPTIONAL if not _import(mod_name)]
     if not missing:
         return None
-    return f"Optional: {OPTIONAL_EXTRAS} for JS rendering of heavy pages."
+    return f"Optional: {OPTIONAL_EXTRAS} for JS rendering, progress bar, and readability."
