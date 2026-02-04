@@ -2,6 +2,8 @@
 
 Basic scraper: PDFs, text, and images from websites at high quality, stored locally.
 
+**Author:** Seth Strickland · **License:** [MIT](LICENSE)
+
 ## Versioning
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`.
@@ -14,7 +16,7 @@ For the **0.y.z** range, the public API is treated as unstable: MINOR may introd
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT License. Copyright (c) 2025 Seth Strickland. See [LICENSE](LICENSE).
 
 ## Install and run
 
@@ -29,6 +31,8 @@ This installs the package in editable mode and registers the `scrape` and `scrap
 ```bash
 scrape --url https://example.com/page [--out-dir output] [--delay 1] [--crawl] [--max-depth 2] [--same-domain-only]
 ```
+
+Filter images by file size (uses HEAD `Content-Length`): `--min-image-size 50k` and/or `--max-image-size 5m` (suffixes `k`/`m` for KB/MB).
 
 Or open the simple GUI:
 

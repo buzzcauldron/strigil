@@ -43,6 +43,18 @@ from web_scraper.storage import (
 VALID_TYPES = frozenset({"pdf", "text", "images"})
 
 
+def _parse_size(s: str) -> int:
+    """Parse size string to bytes: 100, 100k, 1m (case-insensitive)."""
+    s = s.strip().lower()
+    if not s:
+        raise ValueError("empty size")
+    if s.endswith("k"):
+        return int(s[:-1]) * 1024
+    if s.endswith("m"):
+        return int(s[:-1]) * 1024 * 1024
+    return int(s)
+
+
 def _scrape_page(
     url: str,
     out_dir: Path,
@@ -54,6 +66,8 @@ def _scrape_page(
     collect_links: bool,
     types: set[str] | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    min_image_size: int | None = None,
+    max_image_size: int | None = None,
 ) -> list[str]:
     """
     Scrape a single page: PDFs, text, images (according to types).
@@ -122,10 +136,14 @@ def _scrape_page(
             if img_url in urls_map:
                 continue
             best_url = get_best_image_url(img_url, None, try_high_res=True)
-            ct = fetcher.head_content_type(best_url, delay=delay)
+            ct, content_length = fetcher.head_metadata(best_url, delay=delay)
             if ct and not ct.startswith("image/"):
                 best_url = img_url
-                ct = fetcher.head_content_type(img_url, delay=delay)
+                ct, content_length = fetcher.head_metadata(img_url, delay=delay)
+            if min_image_size is not None and content_length is not None and content_length < min_image_size:
+                continue
+            if max_image_size is not None and content_length is not None and content_length > max_image_size:
+                continue
             dest = path_for_image(out_dir, domain, best_url, ct)
             if dest.exists():
                 urls_map[img_url] = str(dest)
@@ -195,11 +213,37 @@ def main() -> None:
         action="store_true",
         help="Disable progress bar (e.g. for scripting)",
     )
+    parser.add_argument(
+        "--min-image-size",
+        type=str,
+        default=None,
+        metavar="SIZE",
+        help="Skip images smaller than SIZE (e.g. 50k, 1m). Uses HEAD Content-Length.",
+    )
+    parser.add_argument(
+        "--max-image-size",
+        type=str,
+        default=None,
+        metavar="SIZE",
+        help="Skip images larger than SIZE (e.g. 5m, 10m). Uses HEAD Content-Length.",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
     limit = args.limit
     types_set = set(args.types) if args.types else None
+    min_image_size = None
+    max_image_size = None
+    if args.min_image_size:
+        try:
+            min_image_size = _parse_size(args.min_image_size)
+        except ValueError as e:
+            parser.error(f"--min-image-size: {e}")
+    if args.max_image_size:
+        try:
+            max_image_size = _parse_size(args.max_image_size)
+        except ValueError as e:
+            parser.error(f"--max-image-size: {e}")
     workers = args.workers if args.workers is not None else default_workers()
     workers = max(1, min(workers, default_workers()))
 
@@ -208,9 +252,13 @@ def main() -> None:
         _crawl_parallel(
             args.url, out_dir, args.delay, args.max_depth,
             args.same_domain_only, limit, types_set, workers, use_progress,
+            min_image_size, max_image_size,
         )
     else:
-        _run_single_or_sequential_crawl(args, out_dir, limit, types_set, workers, use_progress)
+        _run_single_or_sequential_crawl(
+            args, out_dir, limit, types_set, workers, use_progress,
+            min_image_size, max_image_size,
+        )
 
     print("\nDone.", file=sys.stderr)
 
@@ -222,6 +270,8 @@ def _run_single_or_sequential_crawl(
     types_set: set[str] | None,
     workers: int,
     use_progress: bool,
+    min_image_size: int | None,
+    max_image_size: int | None,
 ) -> None:
     """Single-page scrape or sequential crawl (workers=1)."""
     with Fetcher() as fetcher:
@@ -248,6 +298,8 @@ def _run_single_or_sequential_crawl(
                         url, out_dir, args.delay, manifest, fetcher,
                         limit, limit, collect_links=True, types=types_set,
                         progress_callback=None,
+                        min_image_size=min_image_size,
+                        max_image_size=max_image_size,
                     )
                     if use_progress:
                         pbar.update(1)
@@ -276,6 +328,8 @@ def _run_single_or_sequential_crawl(
                     args.url, out_dir, args.delay, manifest, fetcher,
                     limit, limit, collect_links=False, types=types_set,
                     progress_callback=progress_cb,
+                    min_image_size=min_image_size,
+                    max_image_size=max_image_size,
                 )
             finally:
                 if use_progress:
@@ -292,6 +346,8 @@ def _crawl_parallel(
     types_set: set[str] | None,
     workers: int,
     use_progress: bool,
+    min_image_size: int | None,
+    max_image_size: int | None,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -314,6 +370,9 @@ def _crawl_parallel(
                     links = _scrape_page(
                         url, out_dir, delay, manifest, fetcher,
                         limit, limit, collect_links=True, types=types_set,
+                        progress_callback=None,
+                        min_image_size=min_image_size,
+                        max_image_size=max_image_size,
                     )
                 except Exception as e:
                     print(f"Error {url}: {e}", file=sys.stderr)

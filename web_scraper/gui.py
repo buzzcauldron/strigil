@@ -11,6 +11,23 @@ from tkinter import ttk
 from web_scraper._deps import check_required
 
 
+def _open_folder(path: str) -> None:
+    """Open path in the system file manager; create dir if missing."""
+    if not path or not path.strip():
+        return
+    abs_path = os.path.abspath(path.strip())
+    try:
+        os.makedirs(abs_path, exist_ok=True)
+    except OSError:
+        pass
+    if sys.platform == "darwin":
+        subprocess.run(["open", abs_path], check=False)
+    elif sys.platform == "win32":
+        os.startfile(abs_path)  # type: ignore[attr-defined]
+    else:
+        subprocess.run(["xdg-open", abs_path], check=False)
+
+
 def main() -> None:
     check_required()
     root = tk.Tk()
@@ -26,9 +43,13 @@ def main() -> None:
     url_entry.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
 
     ttk.Label(main_frame, text="Output directory").grid(row=2, column=0, sticky=tk.W, pady=(0, 2))
+    out_row = ttk.Frame(main_frame)
+    out_row.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+    main_frame.columnconfigure(0, weight=1)
     out_var = tk.StringVar(value="output")
-    out_entry = ttk.Entry(main_frame, textvariable=out_var, width=50)
-    out_entry.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+    out_entry = ttk.Entry(out_row, textvariable=out_var, width=50)
+    out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+    ttk.Button(out_row, text="Open folder", command=lambda: _open_folder(out_var.get())).pack(side=tk.LEFT)
 
     types_frame = ttk.LabelFrame(main_frame, text="File types")
     types_frame.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
@@ -39,8 +60,17 @@ def main() -> None:
     ttk.Checkbutton(types_frame, text="Text", variable=type_text_var).pack(side=tk.LEFT, padx=(0, 12))
     ttk.Checkbutton(types_frame, text="Images", variable=type_images_var).pack(side=tk.LEFT)
 
+    size_frame = ttk.LabelFrame(main_frame, text="Image size filter (optional)")
+    size_frame.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    min_image_var = tk.StringVar(value="")
+    max_image_var = tk.StringVar(value="")
+    ttk.Label(size_frame, text="Min (KB):").pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Entry(size_frame, textvariable=min_image_var, width=8).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Label(size_frame, text="Max (MB):").pack(side=tk.LEFT, padx=(8, 4))
+    ttk.Entry(size_frame, textvariable=max_image_var, width=8).pack(side=tk.LEFT)
+
     opts_frame = ttk.Frame(main_frame)
-    opts_frame.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    opts_frame.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
     delay_var = tk.DoubleVar(value=1.0)
     ttk.Label(opts_frame, text="Delay (s):").pack(side=tk.LEFT)
     delay_spin = ttk.Spinbox(opts_frame, from_=0.5, to=10, increment=0.5, width=5, textvariable=delay_var)
@@ -55,9 +85,9 @@ def main() -> None:
     ttk.Checkbutton(opts_frame, text="Same domain only", variable=same_domain_var).pack(side=tk.LEFT)
 
     log_frame = ttk.LabelFrame(main_frame, text="Log")
-    log_frame.grid(row=6, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+    log_frame.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
     main_frame.columnconfigure(0, weight=1)
-    main_frame.rowconfigure(6, weight=1)
+    main_frame.rowconfigure(7, weight=1)
 
     log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
     log_scroll = ttk.Scrollbar(log_frame)
@@ -122,6 +152,12 @@ def main() -> None:
             append_log("Error: Select at least one file type.\n")
             scrape_btn_ref.config(state=tk.NORMAL)
             return
+        min_s = min_image_var.get().strip()
+        if min_s:
+            cmd.extend(["--min-image-size", f"{min_s}k"])
+        max_s = max_image_var.get().strip()
+        if max_s:
+            cmd.extend(["--max-image-size", f"{max_s}m"])
         if crawl_var.get():
             cmd.extend(["--crawl", "--max-depth", str(depth)])
             if same_domain_var.get():
@@ -164,7 +200,7 @@ def main() -> None:
         poll_queue(scrape_btn_ref)
 
     btn_frame = ttk.Frame(main_frame)
-    btn_frame.grid(row=7, column=0, columnspan=2)
+    btn_frame.grid(row=8, column=0, columnspan=2)
     scrape_btn = ttk.Button(btn_frame, text="Scrape", command=lambda: run_scrape(scrape_btn))
     scrape_btn.pack(side=tk.LEFT, padx=(0, 8))
     ttk.Button(btn_frame, text="Clear log", command=lambda: (log_text.config(state=tk.NORMAL), log_text.delete("1.0", tk.END), log_text.config(state=tk.DISABLED))).pack(side=tk.LEFT)

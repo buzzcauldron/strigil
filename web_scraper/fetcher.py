@@ -98,6 +98,22 @@ class Fetcher:
         except Exception:
             return None
 
+    def head_metadata(self, url: str, *, timeout: float = 10.0, delay: float = 0) -> tuple[str | None, int | None]:
+        """HEAD request; returns (content_type, content_length). content_length is None if header missing."""
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            client = self._get_client()
+            resp = client.head(url, timeout=timeout)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "")
+            content_type = ct.split(";")[0].strip().lower() if ct else None
+            cl = resp.headers.get("content-length")
+            content_length = int(cl) if cl is not None and cl.isdigit() else None
+            return content_type, content_length
+        except Exception:
+            return None, None
+
 
 def fetch_html(url: str, *, timeout: float = DEFAULT_TIMEOUT, delay: float = 0) -> tuple[bytes, str]:
     """Standalone fetch (creates temporary client). Prefer Fetcher for multiple requests."""
