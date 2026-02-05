@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from web_scraper.extractors import (
     find_contentdm_full_res_urls,
+    find_derived_iiif_manifest_urls,
     find_image_urls,
     find_iiif_manifest_urls,
     parse_iiif_manifest,
@@ -41,7 +42,13 @@ def collect_image_urls(
         add(u)
 
     if fetch_manifest is not None:
-        for manifest_url in find_iiif_manifest_urls(soup, url, html_str):
+        manifest_urls = list(find_iiif_manifest_urls(soup, url, html_str))
+        manifest_urls.extend(find_derived_iiif_manifest_urls(url))
+        seen_manifests: set[str] = set()
+        for manifest_url in manifest_urls:
+            if manifest_url in seen_manifests:
+                continue
+            seen_manifests.add(manifest_url)
             try:
                 raw = fetch_manifest(manifest_url)
                 data = json.loads(raw.decode("utf-8"))

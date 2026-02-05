@@ -52,6 +52,46 @@ ITERATION_TIMEOUT_FACTOR = 1.5
 
 CRAWL_TIP = "  Tip: --workers 12 or --aggressiveness aggressive for faster crawl."
 
+# IIIF full-res images (full/full region) are typically 1–5MB; use sequential to avoid timeouts.
+LARGE_IIIF_MIN_COUNT = 10  # If this many+ IIIF full-res images, throttle to 1 worker
+
+
+def _is_large_iiif_image(url: str) -> bool:
+    """True if URL is IIIF Image API full-resolution (typically multi-MB)."""
+    if not url or "/iiif/image/" not in url.lower():
+        return False
+    path = (urlparse(url).path or "").lower()
+    return "/full/" in path  # full region = full resolution
+
+
+def _effective_asset_workers(
+    work_items: list[tuple[str, str, str | None]],
+    requested: int,
+    use_browser: bool,
+) -> int:
+    """Reduce parallelism when work is mostly large IIIF images (avoids timeouts)."""
+    if use_browser or requested <= 1:
+        return 1 if use_browser else requested
+    image_items = [(u, b, ct) for u, b, ct in work_items if ct != "application/pdf"]
+    large_count = sum(1 for _, best_url, _ in image_items if _is_large_iiif_image(best_url))
+    if large_count >= LARGE_IIIF_MIN_COUNT and large_count >= len(image_items) // 2:
+        return 1
+    return min(requested, SAFE_ASSET_WORKERS, len(work_items) or 1)
+
+
+def _effective_asset_workers_for_tasks(
+    tasks: list[tuple[str, Path, str, str]],
+    requested: int,
+) -> int:
+    """Like _effective_asset_workers but for (fetch_url, dest, ct, map_key) task format."""
+    if requested <= 1:
+        return requested
+    image_tasks = [t for t in tasks if t[2] != "application/pdf"]
+    large_count = sum(1 for fetch_url, _, _, _ in image_tasks if _is_large_iiif_image(fetch_url))
+    if large_count >= LARGE_IIIF_MIN_COUNT and large_count >= len(image_tasks) // 2:
+        return 1
+    return min(requested, SAFE_ASSET_WORKERS, len(tasks) or 1)
+
 
 @dataclass
 class MapResult:
@@ -271,7 +311,7 @@ def scrape_assets(
                     return False
             return False
 
-    effective_workers = 1 if use_browser else min(workers, SAFE_ASSET_WORKERS, len(work) or 1)
+    effective_workers = _effective_asset_workers(work, workers, use_browser)
     stagger = (delay / effective_workers) if effective_workers > 1 else 0
     def _progress_msg(ct: str, ok: bool, url: str, best_url: str) -> str:
         with done_lock:
@@ -321,10 +361,12 @@ def scrape_page(
     min_image_size: int | None = None,
     max_image_size: int | None = None,
     same_domain_for_links: str | None = ...,  # None = all links; str = filter; omit = page domain
+    asset_workers: int = 1,
 ) -> list[str]:
     """
     Scrape a single page: PDFs, text, images (according to types).
     Returns page_links only when collect_links is True (crawl mode).
+    When asset_workers > 1, PDF and image downloads run in parallel within the page.
     """
     want = types or VALID_TYPES
     domain = sanitize_domain(url)
@@ -342,30 +384,20 @@ def scrape_page(
 
     soup = BeautifulSoup(html_str, "lxml")
 
-    # PDF pipeline
-    pdf_count = 0
+    # Build PDF work list
+    pdf_work: list[tuple[str, Path]] = []
     if "pdf" in want:
         for pdf_url in find_pdf_urls(soup, url):
-            if limit_pdfs is not None and pdf_count >= limit_pdfs:
+            if limit_pdfs is not None and len(pdf_work) >= limit_pdfs:
                 break
             if pdf_url in urls_map:
                 continue
             if path_exists_for_resource(out_dir, domain, pdf_url, "pdf"):
                 urls_map[pdf_url] = str(path_for_pdf_canonical(out_dir, domain, pdf_url))
                 continue
-            dest = path_for_pdf(out_dir, domain, pdf_url)
-            try:
-                fetcher.fetch_binary(pdf_url, dest, delay=delay)
-                urls_map[pdf_url] = str(dest)
-                types_map[pdf_url] = "application/pdf"
-                pdf_count += 1
-                if progress_callback:
-                    progress_callback("pdf")
-                print(f"  PDF: {pdf_url}", file=sys.stderr)
-            except Exception as e:
-                print(f"  PDF fail {pdf_url}: {e}", file=sys.stderr)
+            pdf_work.append((pdf_url, path_for_pdf(out_dir, domain, pdf_url)))
 
-    # Text pipeline
+    # Text pipeline (single item, no parallelization)
     if "text" in want:
         text = extract_text(soup, html_str)
         if text.strip():
@@ -381,13 +413,13 @@ def scrape_page(
                     progress_callback("text")
                 print(f"  Text: {dest}", file=sys.stderr)
 
-    # Image pipeline
-    img_count = 0
+    # Build image work list (url for urls_map key, best_url to fetch, ct, dest)
+    image_work: list[tuple[str, str, str, Path]] = []
     need_size_filter = min_image_size is not None or max_image_size is not None
     if "images" in want:
         fetch_manifest = lambda u: fetcher.fetch_html(u, delay=delay)[0]
         for img_url in collect_image_urls(soup, url, html_str, fetch_manifest=fetch_manifest, limit=None):
-            if limit_images is not None and img_count >= limit_images:
+            if limit_images is not None and len(image_work) >= limit_images:
                 break
             if img_url in urls_map:
                 continue
@@ -407,27 +439,84 @@ def scrape_page(
             if path_exists_for_resource(out_dir, domain, img_url, "image", ct):
                 urls_map[img_url] = str(path_for_image_canonical(out_dir, domain, img_url, ct))
                 continue
-            dest = path_for_image(out_dir, domain, best_url, ct)
+            image_work.append((img_url, best_url, ct or "image", path_for_image(out_dir, domain, best_url, ct)))
+
+    # Run PDF + image downloads (parallel when asset_workers > 1)
+    # Work items: (fetch_url, dest, ct, map_key) for urls_map[map_key] = str(dest)
+    asset_tasks: list[tuple[str, Path, str, str]] = []
+    for pdf_url, dest in pdf_work:
+        asset_tasks.append((pdf_url, dest, "application/pdf", pdf_url))
+    for img_url, best_url, ct, dest in image_work:
+        asset_tasks.append((best_url, dest, ct, img_url))
+
+    if not asset_tasks:
+        pass
+    elif asset_workers <= 1:
+        for fetch_url, dest, ct, map_key in asset_tasks:
             try:
-                fetcher.fetch_binary(best_url, dest, delay=delay)
-                urls_map[img_url] = str(dest)
-                types_map[img_url] = ct or "image"
-                img_count += 1
+                fetcher.fetch_binary(fetch_url, dest, delay=delay)
+                urls_map[map_key] = str(dest)
+                types_map[map_key] = ct
                 if progress_callback:
-                    progress_callback("image")
-                print(f"  Image: {best_url}", file=sys.stderr)
+                    progress_callback("pdf" if ct == "application/pdf" else "image")
+                print(f"  PDF: {fetch_url}" if ct == "application/pdf" else f"  Image: {fetch_url}", file=sys.stderr)
             except Exception as e:
-                if best_url != img_url:
+                if ct != "application/pdf" and map_key != fetch_url:
                     try:
-                        fetcher.fetch_binary(img_url, dest, delay=delay)
-                        urls_map[img_url] = str(dest)
-                        img_count += 1
+                        fetcher.fetch_binary(map_key, dest, delay=delay)
+                        urls_map[map_key] = str(dest)
+                        types_map[map_key] = ct
                         if progress_callback:
                             progress_callback("image")
+                        print(f"  Image: {map_key}", file=sys.stderr)
                     except Exception:
-                        print(f"  Image fail {img_url}: {e}", file=sys.stderr)
+                        print(f"  Image fail {map_key}: {e}", file=sys.stderr)
                 else:
-                    print(f"  Image fail {img_url}: {e}", file=sys.stderr)
+                    print(f"  {'PDF' if ct == 'application/pdf' else 'Image'} fail {map_key}: {e}", file=sys.stderr)
+    else:
+        effective = _effective_asset_workers_for_tasks(asset_tasks, asset_workers)
+        stagger = (delay / effective) if effective > 1 else 0
+        manifest_lock = threading.Lock()
+
+        def _download_asset(item: tuple[str, Path, str, str], stagger_delay: float) -> tuple[str, Path, str, str] | None:
+            fetch_url, dest, ct, map_key = item
+            time.sleep(stagger_delay)
+            try:
+                fetcher.fetch_binary(fetch_url, dest, delay=0)
+                return (map_key, dest, ct, "pdf" if ct == "application/pdf" else "image")
+            except Exception as e:
+                if ct != "application/pdf" and map_key != fetch_url:
+                    try:
+                        fetcher.fetch_binary(map_key, dest, delay=0)
+                        return (map_key, dest, ct, "image")
+                    except Exception:
+                        return (map_key, dest, ct, f"fail:{e!s}")
+                return (map_key, dest, ct, f"fail:{e!s}")
+
+        with ThreadPoolExecutor(max_workers=effective) as ex:
+            futures = {
+                ex.submit(_download_asset, item, stagger * (i % effective)): item
+                for i, item in enumerate(asset_tasks)
+            }
+            for fut in as_completed(futures):
+                fetch_url, dest, ct, map_key = futures[fut]
+                try:
+                    result = fut.result()
+                except Exception as e:
+                    print(f"  {'PDF' if ct == 'application/pdf' else 'Image'} fail {map_key}: {e}", file=sys.stderr)
+                    continue
+                if result is None:
+                    continue
+                _map_key, _dest, _ct, status = result
+                with manifest_lock:
+                    urls_map[_map_key] = str(_dest)
+                    types_map[_map_key] = _ct
+                if status.startswith("fail:"):
+                    print(f"  {'PDF' if _ct == 'application/pdf' else 'Image'} fail {_map_key}: {status[5:]}", file=sys.stderr)
+                else:
+                    if progress_callback:
+                        progress_callback(status)
+                    print(f"  PDF: {_map_key}" if _ct == "application/pdf" else f"  Image: {_map_key}", file=sys.stderr)
 
     save_manifest(mf_path, manifest)
 
@@ -655,74 +744,79 @@ def crawl_parallel(
         pending_lock = threading.Lock()
         pbar = tqdm(desc="Crawl", unit=" page", file=sys.stderr) if (tqdm and use_progress) else None
 
-        def process_one(url: str, depth: int) -> list[str]:
+        def process_one(url: str, depth: int, fetcher: Fetcher) -> list[str]:
             if not can_fetch(url):
                 return []
-            with Fetcher(use_browser=use_browser) as fetcher:
-                domain = sanitize_domain(url)
-                with manifest_lock:
-                    manifest = load_manifest(manifest_path(out_dir, domain))
-                    try:
-                        links = scrape_page(
-                            url, out_dir, delay, manifest, fetcher,
-                            limit, limit, collect_links=True, types=types_set,
-                            progress_callback=None,
-                            min_image_size=min_image_size,
-                            max_image_size=max_image_size,
-                            same_domain_for_links=link_filter,
-                        )
-                    except Exception as e:
-                        print(f"Error {url}: {e}", file=sys.stderr)
-                        return []
-                    save_manifest(manifest_path(out_dir, domain), manifest)
+            domain = sanitize_domain(url)
+            with manifest_lock:
+                manifest = load_manifest(manifest_path(out_dir, domain))
+            try:
+                links = scrape_page(
+                    url, out_dir, delay, manifest, fetcher,
+                    limit, limit, collect_links=True, types=types_set,
+                    progress_callback=None,
+                    min_image_size=min_image_size,
+                    max_image_size=max_image_size,
+                    same_domain_for_links=link_filter,
+                    asset_workers=min(SAFE_ASSET_WORKERS, workers),
+                )
+            except Exception as e:
+                print(f"Error {url}: {e}", file=sys.stderr)
+                return []
+            with manifest_lock:
+                save_manifest(manifest_path(out_dir, domain), manifest)
             return links
 
         def worker() -> None:
             nonlocal pending
-            while True:
-                item = work_queue.get()
-                if item is None:
-                    return
-                url, depth = item
-                if depth > max_depth:
-                    with pending_lock:
-                        pending -= 1
-                        if pending == 0:
-                            for _ in range(workers):
-                                work_queue.put(None)
-                    continue
-                with seen_lock:
-                    if url in seen:
+            fetcher = Fetcher(use_browser=use_browser)
+            try:
+                while True:
+                    item = work_queue.get()
+                    if item is None:
+                        return
+                    url, depth = item
+                    if depth > max_depth:
                         with pending_lock:
                             pending -= 1
                             if pending == 0:
                                 for _ in range(workers):
                                     work_queue.put(None)
                         continue
-                    seen.add(url)
-                print(f"\n[{depth}] {url}", file=sys.stderr)
-                try:
-                    links = process_one(url, depth)
-                finally:
-                    with pending_lock:
-                        pending -= 1
-                        if pbar:
-                            pbar.set_postfix(pending=pending)
-                        if pending == 0:
-                            for _ in range(workers):
-                                work_queue.put(None)
-                    if pbar:
-                        pbar.update(1)
-                for link in links:
-                    if same_dom and urlparse(link).netloc != start_domain:
-                        continue
                     with seen_lock:
-                        if link in seen:
+                        if url in seen:
+                            with pending_lock:
+                                pending -= 1
+                                if pending == 0:
+                                    for _ in range(workers):
+                                        work_queue.put(None)
                             continue
-                        seen.add(link)
-                    work_queue.put((link, depth + 1))
-                    with pending_lock:
-                        pending += 1
+                        seen.add(url)
+                    print(f"\n[{depth}] {url}", file=sys.stderr)
+                    try:
+                        links = process_one(url, depth, fetcher)
+                    finally:
+                        with pending_lock:
+                            pending -= 1
+                            if pbar:
+                                pbar.set_postfix(pending=pending)
+                            if pending == 0:
+                                for _ in range(workers):
+                                    work_queue.put(None)
+                        if pbar:
+                            pbar.update(1)
+                    for link in links:
+                        if same_dom and urlparse(link).netloc != start_domain:
+                            continue
+                        with seen_lock:
+                            if link in seen:
+                                continue
+                            seen.add(link)
+                        work_queue.put((link, depth + 1))
+                        with pending_lock:
+                            pending += 1
+            finally:
+                fetcher.close()
 
         with pending_lock:
             pending = 1

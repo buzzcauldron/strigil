@@ -24,14 +24,23 @@ def sanitize_basename(url: str, default_ext: str = "") -> str:
     parsed = urlparse(url)
     path = parsed.path or "/"
     parts = [p for p in path.split("/") if p]
-    # IIIF Image API: /.../image/4631112/full/full/0/default.jpg -> use 4631112_default.jpg
-    if "/image/" in path and "/full/" in path and len(parts) >= 2:
+    # IIIF Image API: /.../image/{ident}/full/.../default.jpg -> use {ident}_default.jpg
+    # ident can be numeric (4631112) or UUID (ad6c60d9-62da-4624-aae1-fe9096ea67a9)
+    if "/image/" in path and len(parts) >= 2:
         try:
             idx = next(i for i, p in enumerate(parts) if p == "image")
-            if idx + 1 < len(parts) and parts[idx + 1].isdigit():
+            if idx + 1 < len(parts):
                 ident = parts[idx + 1]
-                suffix = parts[-1].split("?")[0] if parts else "default"
-                name = f"{ident}_{suffix}"
+                is_uuid = (
+                    len(ident) == 36
+                    and ident.count("-") == 4
+                    and all(c in "0123456789abcdef-" for c in ident.lower())
+                )
+                if ident.isdigit() or is_uuid:
+                    suffix = parts[-1].split("?")[0] if parts else "default"
+                    name = f"{ident}_{suffix}"
+                else:
+                    name = parts[-1] or "index"
             else:
                 name = parts[-1] or "index"
         except StopIteration:

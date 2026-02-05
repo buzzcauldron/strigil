@@ -2,7 +2,7 @@
 
 import json
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -21,6 +21,21 @@ _CONTENTDM_ITEM_RE = re.compile(
     r"/digital/collection/([^/?#]+)/id/(\d+)",
     re.IGNORECASE,
 )
+# Digital Bodleian: digital.bodleian.ox.ac.uk/objects/{uuid}/... (IIIF at iiif.bodleian.ox.ac.uk)
+_BODLEIAN_OBJECT_RE = re.compile(
+    r"digital\.bodleian\.ox\.ac\.uk/objects/([a-f0-9-]{36})",
+    re.IGNORECASE,
+)
+# Internet Archive: archive.org/details/{identifier}/... -> iiif.archive.org/iiif/{id}/manifest.json
+_ARCHIVE_ORG_DETAILS_RE = re.compile(
+    r"archive\.org/details/([^/?#]+)",
+    re.IGNORECASE,
+)
+# Stanford PURL: purl.stanford.edu/{id}/... -> purl.stanford.edu/{id}/iiif/manifest
+_STANFORD_PURL_RE = re.compile(
+    r"purl\.stanford\.edu/([a-z0-9_-]+)",
+    re.IGNORECASE,
+)
 # IIIF Image API URL with size/region (e.g. /full/pct:15/) -> we want full size (full/full; max not supported on all servers)
 _IIIF_IMAGE_API_RE = re.compile(
     r"(https?://[^/]+/digital/iiif/2/[^/]+)/full/[^/]+/\d+/[^/]+\.(jpg|png|webp)",
@@ -32,6 +47,9 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".
 # URL path patterns to skip (UI chrome: favicons, social icons, etc.)
 SKIP_IMAGE_PATTERNS = ("/favicon.ico", "/icon_", "icon_facebook", "icon_instagram", "icon_google", "icon_youtube", "icon_pinterest", "icon_twitter", "icon_linkedin")
 
+# URL substrings that indicate tracking/analytics pixels (skip to avoid 400s and noise)
+TRACKING_URL_SUBSTRINGS = ("facebook.com/tr", "google-analytics.com", "googletagmanager.com", "doubleclick.net", "scorecardresearch.com")
+
 # Data attributes for lazy-loaded or high-res images (order: prefer hires over lazy)
 IMG_DATA_ATTRS = (
     "data-zoom-src", "data-full-url", "data-hires", "data-highres", "data-large",
@@ -42,9 +60,12 @@ IMG_PATH_HINTS = ("/image", "/img", "/photo", "/media", "/thumb", "/icaimage", "
 
 
 def should_skip_image_url(url: str) -> bool:
-    """True if URL looks like UI chrome (favicon, social icons) rather than content."""
+    """True if URL looks like UI chrome (favicon, social icons) or tracking pixels."""
     path = urlparse(url).path.lower()
-    return any(p in path for p in SKIP_IMAGE_PATTERNS)
+    if any(p in path for p in SKIP_IMAGE_PATTERNS):
+        return True
+    url_lower = url.lower()
+    return any(t in url_lower for t in TRACKING_URL_SUBSTRINGS)
 
 
 def _resolve_urls(base_url: str, seen: set[str], *candidates: str) -> list[str]:
@@ -292,6 +313,61 @@ def find_iiif_manifest_urls(soup: BeautifulSoup, base_url: str, raw_html: str = 
             add_manifest(m.group(1))
         for m in _IIIF_MANIFEST_URL_RE.finditer(raw_html):
             add_manifest(m.group(0))
+
+    return urls
+
+
+def find_derived_iiif_manifest_urls(page_url: str) -> list[str]:
+    """
+    Derive IIIF manifest URLs from known page URL patterns (JS-heavy sites where
+    manifest isn't in HTML). Strategies:
+    - manifest= / iiif-content= in query or fragment (Universal Viewer, Mirador)
+    - Digital Bodleian: .../objects/{uuid}/... -> iiif.bodleian.ox.ac.uk
+    - Internet Archive: archive.org/details/{id} -> iiif.archive.org
+    - Stanford PURL: purl.stanford.edu/{id} -> purl.stanford.edu/{id}/iiif/manifest
+    """
+    urls: list[str] = []
+    parsed = urlparse(page_url)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path or ""
+    combined = f"{host}{path}"
+
+    def add(u: str) -> None:
+        u = (u or "").strip()
+        if not u:
+            return
+        u = unquote(u)
+        if not u.startswith(("http://", "https://")):
+            return
+        if u in urls:
+            return
+        if "manifest" in u.lower() or "/iiif/" in u.lower():
+            urls.append(u)
+
+    # 1. manifest= or iiif-content= in query string or fragment (Universal Viewer, Mirador)
+    for part in (parsed.query or "", parsed.fragment or ""):
+        if part.startswith("?"):
+            part = part[1:]
+        if not part:
+            continue
+        for key in ("manifest", "iiif-content", "iiif_content"):
+            for v in parse_qs(part).get(key, []):
+                add(v)
+
+    # 2. Digital Bodleian
+    m = _BODLEIAN_OBJECT_RE.search(combined)
+    if m:
+        add(f"https://iiif.bodleian.ox.ac.uk/iiif/manifest/{m.group(1)}.json")
+
+    # 3. Internet Archive
+    m = _ARCHIVE_ORG_DETAILS_RE.search(combined)
+    if m:
+        add(f"https://iiif.archive.org/iiif/{m.group(1)}/manifest.json")
+
+    # 4. Stanford PURL
+    m = _STANFORD_PURL_RE.search(combined)
+    if m:
+        add(f"https://purl.stanford.edu/{m.group(1)}/iiif/manifest")
 
     return urls
 

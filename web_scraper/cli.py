@@ -1,10 +1,16 @@
 """CLI entry point for the scraper. Invoked as `scrape` when installed with pip install -e ."""
 
+import os
+
+# Suppress leaked semaphore warning from multiprocessing.resource_tracker (it runs in a
+# child process, so main-process warnings.filterwarnings has no effect; env is inherited).
+os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning:multiprocessing.resource_tracker")
+
 import argparse
 import sys
 import warnings
 
-# Suppress harmless multiprocessing semaphore leak warning (e.g. from deps on exit)
+# Also suppress in main process in case any leak warning is emitted here
 warnings.filterwarnings("ignore", message=r".*leaked semaphore.*", category=UserWarning)
 from pathlib import Path
 
@@ -71,6 +77,11 @@ def main() -> None:
         default=None,
         metavar="N",
         help=f"Parallel workers for crawl (default: auto from CPU, max {default_workers()})",
+    )
+    parser.add_argument(
+        "--sequential",
+        action="store_true",
+        help="Download one asset at a time (avoids timeout on slow servers, more polite). Equivalent to --workers 1.",
     )
     parser.add_argument(
         "--no-progress",
@@ -156,6 +167,9 @@ def main() -> None:
             )
     if args.delay is None:
         args.delay = 0.5
+
+    if getattr(args, "sequential", False):
+        args.workers = 1
 
     if not args.url or not [u for u in args.url if u and str(u).strip()]:
         parser.error("At least one URL is required (or use --hardware to print hardware info).")
