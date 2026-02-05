@@ -1,9 +1,31 @@
 """Extract PDF links, main text, and image URLs from HTML."""
 
+import json
 import re
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+
+# Match manifest= URL in iframe src/hash (e.g. uv.html#?manifest=https://.../manifest.json)
+_IIIF_MANIFEST_RE = re.compile(
+    r"manifest=([^&\s'\"]+manifest\.json)",
+    re.IGNORECASE,
+)
+# Match manifest.json URLs in href or plain text
+_IIIF_MANIFEST_URL_RE = re.compile(
+    r"https?://[^\s'\"<>]+manifest\.json(?:\?[^\s'\"]*)?",
+    re.IGNORECASE,
+)
+# CONTENTdm item page: /digital/collection/{coll}/id/{id}
+_CONTENTDM_ITEM_RE = re.compile(
+    r"/digital/collection/([^/?#]+)/id/(\d+)",
+    re.IGNORECASE,
+)
+# IIIF Image API URL with size/region (e.g. /full/pct:15/) -> we want full size (full/full; max not supported on all servers)
+_IIIF_IMAGE_API_RE = re.compile(
+    r"(https?://[^/]+/digital/iiif/2/[^/]+)/full/[^/]+/\d+/[^/]+\.(jpg|png|webp)",
+    re.IGNORECASE,
+)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}
 
@@ -186,6 +208,140 @@ def find_image_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
                 add_url(url)
 
     return urls
+
+
+def find_contentdm_full_res_urls(page_url: str, raw_html: str = "") -> list[str]:
+    """
+    For CONTENTdm (e.g. hdl.huntington.org): derive full-resolution IIIF image URLs.
+    - If page_url is a CONTENTdm item (/digital/collection/{coll}/id/{id}), add IIIF full-size URL.
+    - If raw_html contains IIIF Image API URLs under /digital/iiif/2/, rewrite them to /full/full/0/default.jpg.
+    See: https://help.oclc.org/.../IIIF_API_reference
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    parsed = urlparse(page_url)
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+    # Current page is a CONTENTdm item?
+    m = _CONTENTDM_ITEM_RE.search(parsed.path or "")
+    if m:
+        coll, rec_id = m.group(1), m.group(2)
+        full_url = f"{base}/digital/iiif/2/{coll}:{rec_id}/full/full/0/default.jpg"
+        if full_url not in seen:
+            seen.add(full_url)
+            out.append(full_url)
+
+    # Any IIIF image URLs in HTML (thumbnails) -> full-res
+    if raw_html:
+        for m in _IIIF_IMAGE_API_RE.finditer(raw_html):
+            prefix, ext = m.group(1), m.group(2).lower()
+            full_url = f"{prefix}/full/full/0/default.{ext}"
+            if full_url not in seen:
+                seen.add(full_url)
+                out.append(full_url)
+
+    return out
+
+
+def find_iiif_manifest_urls(soup: BeautifulSoup, base_url: str, raw_html: str = "") -> list[str]:
+    """
+    Find IIIF manifest URLs from iframes (Universal Viewer, Mirador, etc.), links, and page text.
+    Returns absolute manifest URLs, deduplicated.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+
+    def add_manifest(u: str) -> None:
+        u = u.strip()
+        if not u or u in seen:
+            return
+        # Must be a manifest endpoint, not a viewer URL that contains manifest=
+        if "/manifest.json" not in u.lower() or "uv.html" in u.lower() or "mirador" in u.lower():
+            return
+        abs_u = urljoin(str(base_url), str(u))
+        if abs_u not in seen:
+            seen.add(abs_u)
+            urls.append(abs_u)
+
+    # iframe src (e.g. viewer.library.wales/...uv.html#?manifest=https://.../manifest.json)
+    for iframe in soup.select("iframe[src]"):
+        src = iframe.get("src", "")
+        for m in _IIIF_MANIFEST_RE.finditer(src):
+            add_manifest(m.group(1))
+        for m in _IIIF_MANIFEST_URL_RE.finditer(src):
+            add_manifest(m.group(0))
+
+    # a[href] and embed/object data
+    for tag in soup.select("a[href], embed[src], object[data]"):
+        attr = tag.get("href") or tag.get("src") or tag.get("data") or ""
+        for m in _IIIF_MANIFEST_RE.finditer(attr):
+            add_manifest(m.group(1))
+        for m in _IIIF_MANIFEST_URL_RE.finditer(attr):
+            add_manifest(m.group(0))
+
+    # data-manifest, data-iiif-manifest, etc.
+    for tag in soup.find_all(attrs=lambda a: a and "manifest" in a.lower()):
+        for key, val in (tag.attrs or {}).items():
+            if "manifest" in key.lower() and val:
+                add_manifest(val)
+
+    # Scan raw HTML for embedded manifest URLs
+    if raw_html:
+        for m in _IIIF_MANIFEST_RE.finditer(raw_html):
+            add_manifest(m.group(1))
+        for m in _IIIF_MANIFEST_URL_RE.finditer(raw_html):
+            add_manifest(m.group(0))
+
+    return urls
+
+
+def parse_iiif_manifest(manifest_data: dict) -> list[str]:
+    """
+    Parse IIIF 2.0 or 3.0 manifest JSON; return list of full-size image URLs.
+    Supports sequences/canvases (2.0) and items (3.0).
+    """
+    image_urls: list[str] = []
+    seen: set[str] = set()
+
+    def add_url(u: str) -> None:
+        if u and u not in seen:
+            seen.add(u)
+            image_urls.append(u)
+
+    def image_from_resource(res: dict, service_id: str | None = None) -> str | None:
+        svc = res.get("service")
+        sid = None
+        if isinstance(svc, dict):
+            sid = svc.get("@id") or svc.get("id")
+        sid = sid or service_id
+        # Prefer IIIF Image API URL (full/full/0/default.jpg) - more reliable than direct resource URL
+        if sid:
+            return f"{str(sid).rstrip('/')}/full/full/0/default.jpg"
+        rid = res.get("@id") or res.get("id")
+        if isinstance(rid, str) and ("iiif" in rid.lower() or rid.endswith((".jpg", ".png", ".jpeg", ".webp"))):
+            return rid
+        return None
+
+    def walk_canvas(canvas: dict) -> None:
+        images = canvas.get("images") or canvas.get("items") or []
+        for img in images:
+            res = img.get("resource") if isinstance(img, dict) else None
+            if not res:
+                continue
+            svc = (res.get("service") or {})
+            svc_id = (svc.get("@id") or svc.get("id")) if isinstance(svc, dict) else None
+            url = image_from_resource(res, svc_id)
+            if url:
+                add_url(url)
+
+    sequences = manifest_data.get("sequences") or manifest_data.get("items") or []
+    for seq in sequences:
+        canvases = seq.get("canvases") or seq.get("items") or []
+        for canvas in canvases:
+            walk_canvas(canvas)
+
+    return image_urls
 
 
 def _looks_like_image(url_or_path: str) -> bool:

@@ -12,16 +12,15 @@ REQUIRED = [
     ("lxml", "lxml"),
 ]
 
-# (import_name, pip_package_name); order preserved for install
+# (import_name, pip_package_name); order preserved for install (tqdm is in default deps)
 OPTIONAL = [
     ("playwright", "playwright"),
-    ("tqdm", "tqdm"),
     ("readability", "readability-lxml"),
 ]
 
 INSTALL_CMD = "pip install basic-scraper"
 INSTALL_CMD_SOURCE = "pip install -e ."
-OPTIONAL_EXTRAS = "pip install basic-scraper[js,progress,readability]"
+OPTIONAL_EXTRAS = "pip install basic-scraper[js,readability]"
 
 
 def _import(name: str) -> bool:
@@ -103,4 +102,4 @@ def optional_hint() -> str | None:
     missing = [pip_name for mod_name, pip_name in OPTIONAL if not _import(mod_name)]
     if not missing:
         return None
-    return f"Optional: {OPTIONAL_EXTRAS} for JS rendering, progress bar, and readability."
+    return f"Optional: {OPTIONAL_EXTRAS} for JS rendering and readability."

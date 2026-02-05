@@ -12,27 +12,34 @@ import tkinter as tk
 from tkinter import ttk
 
 from web_scraper._deps import check_required, ensure_optional
+from web_scraper.hardware import (
+    default_workers,
+    get_aggressiveness_params,
+    suggest_aggressiveness,
+)
 
-LAST_URL_FILE = Path.home() / ".basic-scraper" / "last_url.txt"
+LAST_URLS_FILE = Path.home() / ".basic-scraper" / "last_urls.txt"
 
 
-def _load_last_url() -> str:
-    """Return last used URL or default."""
+def _load_last_urls() -> str:
+    """Return last used URL(s), one per line, or default."""
     try:
-        if LAST_URL_FILE.exists():
-            return LAST_URL_FILE.read_text(encoding="utf-8").strip() or "https://example.com"
+        if LAST_URLS_FILE.exists():
+            text = LAST_URLS_FILE.read_text(encoding="utf-8").strip()
+            if text:
+                return text
     except OSError:
         pass
     return "https://example.com"
 
 
-def _save_last_url(url: str) -> None:
-    """Persist URL for next launch."""
-    if not url or not url.strip():
+def _save_last_urls(text: str) -> None:
+    """Persist URL(s) for next launch."""
+    if not text or not text.strip():
         return
     try:
-        LAST_URL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LAST_URL_FILE.write_text(url.strip(), encoding="utf-8")
+        LAST_URLS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_URLS_FILE.write_text(text.strip(), encoding="utf-8")
     except OSError:
         pass
 
@@ -70,10 +77,10 @@ def main() -> None:
     main_frame = ttk.Frame(root, padding=10)
     main_frame.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(main_frame, text="URL").grid(row=0, column=0, sticky=tk.W, pady=(0, 2))
-    url_var = tk.StringVar(value=_load_last_url())
-    url_entry = ttk.Entry(main_frame, textvariable=url_var, width=50)
-    url_entry.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+    ttk.Label(main_frame, text="URLs (one per line)").grid(row=0, column=0, sticky=tk.NW, pady=(0, 2))
+    url_text = tk.Text(main_frame, height=4, width=50, wrap=tk.WORD)
+    url_text.insert("1.0", _load_last_urls())
+    url_text.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
 
     ttk.Label(main_frame, text="Output directory").grid(row=2, column=0, sticky=tk.W, pady=(0, 2))
     out_row = ttk.Frame(main_frame)
@@ -83,6 +90,11 @@ def main() -> None:
     out_entry = ttk.Entry(out_row, textvariable=out_var, width=50)
     out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
     ttk.Button(out_row, text="Open folder", command=lambda: _open_folder(out_var.get())).pack(side=tk.LEFT)
+
+    ttk.Label(main_frame, text="Done script (optional, use {out_dir})").grid(row=4, column=0, sticky=tk.W, pady=(8, 2))
+    done_script_var = tk.StringVar(value="")
+    done_script_entry = ttk.Entry(main_frame, textvariable=done_script_var, width=50)
+    done_script_entry.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
 
     suggest_var = tk.BooleanVar(value=False)
 
@@ -106,10 +118,10 @@ def main() -> None:
         variable=suggest_var,
         command=apply_suggested,
     )
-    suggest_cb.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    suggest_cb.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
 
     types_frame = ttk.LabelFrame(main_frame, text="File types")
-    types_frame.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    types_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
     type_pdf_var = tk.BooleanVar(value=True)
     type_text_var = tk.BooleanVar(value=True)
     type_images_var = tk.BooleanVar(value=True)
@@ -118,7 +130,7 @@ def main() -> None:
     ttk.Checkbutton(types_frame, text="Images", variable=type_images_var).pack(side=tk.LEFT)
 
     size_frame = ttk.LabelFrame(main_frame, text="Image size (include)")
-    size_frame.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    size_frame.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
     size_small_var = tk.BooleanVar(value=True)
     size_medium_var = tk.BooleanVar(value=True)
     size_large_var = tk.BooleanVar(value=True)
@@ -127,11 +139,37 @@ def main() -> None:
     ttk.Checkbutton(size_frame, text="Large (> 1 MB)", variable=size_large_var).pack(side=tk.LEFT)
 
     opts_frame = ttk.Frame(main_frame)
-    opts_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
-    delay_var = tk.DoubleVar(value=0.5)
+    opts_frame.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    suggested = suggest_aggressiveness()
+    initial_params = get_aggressiveness_params("auto")
+    delay_var = tk.DoubleVar(value=initial_params["delay"])
+    workers_var = tk.IntVar(value=initial_params["workers"])
     ttk.Label(opts_frame, text="Delay (s):").pack(side=tk.LEFT)
-    delay_spin = ttk.Spinbox(opts_frame, from_=0.5, to=10, increment=0.5, width=5, textvariable=delay_var)
+    delay_spin = ttk.Spinbox(opts_frame, from_=0.25, to=10, increment=0.25, width=5, textvariable=delay_var)
     delay_spin.pack(side=tk.LEFT, padx=(4, 12))
+    ttk.Label(opts_frame, text="Aggressiveness:").pack(side=tk.LEFT, padx=(8, 4))
+    agg_var = tk.StringVar(value="auto")
+    agg_combo = ttk.Combobox(
+        opts_frame,
+        textvariable=agg_var,
+        values=("auto", "conservative", "balanced", "aggressive"),
+        state="readonly",
+        width=14,
+    )
+    agg_combo.pack(side=tk.LEFT, padx=(4, 12))
+
+    def on_aggressiveness_change(*args: object) -> None:
+        val = agg_var.get()
+        if not val:
+            return
+        raw = "auto" if val.startswith("auto") else val
+        params = get_aggressiveness_params(raw)
+        workers_var.set(max(1, min(12, params["workers"])))
+        delay_var.set(params["delay"])
+
+    agg_var.trace_add("write", on_aggressiveness_change)
+    agg_combo.set(f"auto ({suggested})")
+
     crawl_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(
         opts_frame,
@@ -144,11 +182,21 @@ def main() -> None:
     depth_spin.pack(side=tk.LEFT, padx=(4, 8))
     same_domain_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(opts_frame, text="Same domain only", variable=same_domain_var).pack(side=tk.LEFT)
+    ttk.Label(opts_frame, text="Workers:").pack(side=tk.LEFT, padx=(8, 0))
+    workers_spin = ttk.Spinbox(opts_frame, from_=1, to=12, width=2, textvariable=workers_var)
+    workers_spin.pack(side=tk.LEFT, padx=(4, 0))
+
+    keep_awake_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(
+        main_frame,
+        text="Keep system awake (for long scrapes)",
+        variable=keep_awake_var,
+    ).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
 
     log_frame = ttk.LabelFrame(main_frame, text="Log")
-    log_frame.grid(row=8, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+    log_frame.grid(row=11, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
     main_frame.columnconfigure(0, weight=1)
-    main_frame.rowconfigure(8, weight=1)
+    main_frame.rowconfigure(11, weight=1)
 
     log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
     log_scroll = ttk.Scrollbar(log_frame)
@@ -170,7 +218,7 @@ def main() -> None:
 
     # Status bar: scanning + scraping
     status_frame = ttk.Frame(main_frame)
-    status_frame.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
+    status_frame.grid(row=12, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
     main_frame.columnconfigure(0, weight=1)
     scan_status_var = tk.StringVar(value="")
     scrape_status_var = tk.StringVar(value="")
@@ -183,11 +231,15 @@ def main() -> None:
     current_proc: list[subprocess.Popen | None] = [None]
 
     def run_scrape(scrape_btn_ref: tk.Widget, stop_btn_ref: tk.Widget) -> None:
-        url = url_var.get().strip()
-        if not url:
-            append_log("Error: URL is required.\n")
+        urls = [
+            line.strip()
+            for line in url_text.get("1.0", tk.END).splitlines()
+            if line.strip()
+        ]
+        if not urls:
+            append_log("Error: At least one URL is required.\n")
             return
-        _save_last_url(url)
+        _save_last_urls(url_text.get("1.0", tk.END))
         scrape_btn_ref.config(state=tk.DISABLED)
         scan_status_var.set("Scanning resources...")
         scrape_status_var.set("—")
@@ -233,19 +285,10 @@ def main() -> None:
         if getattr(sys, "frozen", False):
             base = os.path.dirname(sys.executable)
             scrape_bin = os.path.join(base, "scrape.exe" if sys.platform == "win32" else "scrape")
-            cmd = [
-                scrape_bin,
-                "--url",
-                url,
-            ]
+            cmd = [scrape_bin]
         else:
-            cmd = [
-                sys.executable,
-                "-m",
-                "web_scraper.cli",
-                "--url",
-                url,
-            ]
+            cmd = [sys.executable, "-m", "web_scraper.cli"]
+        cmd.extend(["--url"] + urls)
         cmd.extend([
             "--out-dir", out_var.get().strip() or "output",
             "--delay", str(delay),
@@ -291,8 +334,19 @@ def main() -> None:
                 cmd.extend(["--max-image-size", _size_to_arg(high)])
         if crawl_var.get():
             cmd.extend(["--crawl", "--max-depth", str(depth)])
+            try:
+                w = int(workers_var.get())
+                w = max(1, min(12, w))
+                cmd.extend(["--workers", str(w)])
+            except (ValueError, tk.TclError):
+                pass
             if same_domain_var.get():
                 cmd.append("--same-domain-only")
+        done_script = done_script_var.get().strip()
+        if done_script:
+            cmd.extend(["--done-script", done_script])
+        if keep_awake_var.get():
+            cmd.append("--keep-awake")
 
         def worker() -> None:
             try:
@@ -335,7 +389,7 @@ def main() -> None:
         poll_queue(scrape_btn_ref)
 
     btn_frame = ttk.Frame(main_frame)
-    btn_frame.grid(row=10, column=0, columnspan=2)
+    btn_frame.grid(row=13, column=0, columnspan=2)
 
     def do_stop() -> None:
         if current_proc[0] is not None:

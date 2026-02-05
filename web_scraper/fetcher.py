@@ -8,11 +8,14 @@ import httpx
 
 
 def _polite_sleep(delay: float) -> None:
-    """Sleep with ±15% jitter to avoid fixed-interval bot patterns."""
-    if delay <= 0:
-        return
-    jittered = delay * random.uniform(0.85, 1.15)
-    time.sleep(jittered)
+    """Sleep with ±15% jitter plus small random offset to avoid fixed-interval bot patterns."""
+    jittered = delay * random.uniform(0.85, 1.15) if delay > 0 else 0.0
+    # Keep extra offset small for low delays so aggressive scrapes stay fast
+    extra_cap = 0.02 if delay < 0.5 else 0.05
+    extra_ms = random.uniform(0, extra_cap)
+    total = jittered + extra_ms
+    if total > 0:
+        time.sleep(total)
 
 # Browser-like UA to reduce 403 from sites that block scrapers
 DEFAULT_USER_AGENT = (

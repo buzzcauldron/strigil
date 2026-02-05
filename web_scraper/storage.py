@@ -19,11 +19,25 @@ def sanitize_domain(url: str) -> str:
 def sanitize_basename(url: str, default_ext: str = "") -> str:
     """
     Sanitize URL to a safe filename: strip query, replace path chars with _,
-    avoid collisions with numeric suffix.
+    avoid collisions with numeric suffix. IIIF Image API URLs get unique names from the identifier.
     """
     parsed = urlparse(url)
     path = parsed.path or "/"
-    name = path.split("/")[-1] or "index"
+    parts = [p for p in path.split("/") if p]
+    # IIIF Image API: /.../image/4631112/full/full/0/default.jpg -> use 4631112_default.jpg
+    if "/image/" in path and "/full/" in path and len(parts) >= 2:
+        try:
+            idx = next(i for i, p in enumerate(parts) if p == "image")
+            if idx + 1 < len(parts) and parts[idx + 1].isdigit():
+                ident = parts[idx + 1]
+                suffix = parts[-1].split("?")[0] if parts else "default"
+                name = f"{ident}_{suffix}"
+            else:
+                name = parts[-1] or "index"
+        except StopIteration:
+            name = parts[-1] or "index"
+    else:
+        name = parts[-1] or "index"
     name = name.split("?")[0]
     name = re.sub(r"[^\w.-]", "_", name)
     name = name.strip("_") or "file"
