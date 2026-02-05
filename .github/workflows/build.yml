@@ -26,11 +26,28 @@ jobs:
           pip install -e ".[bundle]"
       - name: Build PyInstaller bundle
         run: pyinstaller basic-scraper.spec
-      - name: Upload artifact
+      - name: Create install package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: powershell -Command "Compress-Archive -Path 'dist/basic-scraper' -DestinationPath 'dist/basic-scraper-win.zip' -Force"
+      - name: Create install package (macOS)
+        if: matrix.os == 'macos-latest'
+        run: cd dist && zip -r basic-scraper-mac.zip basic-scraper
+      - name: Create install package (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: tar -czf dist/basic-scraper-linux.tar.gz -C dist basic-scraper
+      - name: Upload folder artifact
         uses: actions/upload-artifact@v4
         with:
           name: basic-scraper-${{ matrix.os }}
           path: dist/basic-scraper/
+      - name: Upload install package
+        uses: actions/upload-artifact@v4
+        with:
+          name: basic-scraper-${{ matrix.os }}-install
+          path: |
+            dist/basic-scraper-win.zip
+            dist/basic-scraper-mac.zip
+            dist/basic-scraper-linux.tar.gz
 
   docker:
     name: Docker
