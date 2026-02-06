@@ -11,5 +11,6 @@ venv/
 env/
 output/
 output_*/
+st-johns-ms17/
 *.log
 .DS_Store

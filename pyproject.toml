@@ -28,8 +28,8 @@ Homepage = "https://github.com/sethstrickland/strigil"
 Repository = "https://github.com/sethstrickland/strigil"
 
 [project.scripts]
-scrape = "strigil.cli:main"
-scrape-gui = "strigil.gui:main"
+strigil = "strigil.cli:main"
+strigil-gui = "strigil.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

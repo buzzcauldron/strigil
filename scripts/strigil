@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Launch strigil: GUI by default, CLI if args given.
+cd "$(dirname "$0")/.."
+if [[ $# -eq 0 ]]; then
+    python -m strigil.gui
+else
+    python -m strigil.cli "$@"
+fi
