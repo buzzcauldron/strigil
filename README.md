@@ -4,16 +4,6 @@ Basic scraper: PDFs, text, and images from websites at high quality, stored loca
 
 **Author:** Seth Strickland · **License:** [MIT](LICENSE)
 
-## Versioning
-
-This project follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`.
-
-- **MAJOR**: Incompatible CLI or API changes (e.g. rename/remove of `--url`, breaking changes in Python API).
-- **MINOR**: New features in a backward-compatible way (e.g. new `--crawl` behavior, new extractors).
-- **PATCH**: Backward-compatible bug fixes and small improvements.
-
-For the **0.y.z** range, the public API is treated as unstable: MINOR may introduce breaking changes if needed. Once we commit to stability, we move to 1.0.0 and follow strict semver. See [CHANGELOG.md](CHANGELOG.md) for release history.
-
 ## License
 
 MIT License. Copyright (c) 2025 Seth Strickland. See [LICENSE](LICENSE).
