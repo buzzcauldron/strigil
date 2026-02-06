@@ -1,4 +1,4 @@
-# Build basic-scraper: PyInstaller bundles on all OS + Docker image. Light runs.
+# Build strigil: PyInstaller bundles on all OS + Docker image. Light runs.
 name: Build
 
 on:
@@ -25,29 +25,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[bundle]"
       - name: Build PyInstaller bundle
-        run: pyinstaller basic-scraper.spec
+        run: pyinstaller strigil.spec
       - name: Create install package (Windows)
         if: matrix.os == 'windows-latest'
-        run: powershell -Command "Compress-Archive -Path 'dist/basic-scraper' -DestinationPath 'dist/basic-scraper-win.zip' -Force"
+        run: powershell -Command "Compress-Archive -Path 'dist/strigil' -DestinationPath 'dist/strigil-win.zip' -Force"
       - name: Create install package (macOS)
         if: matrix.os == 'macos-latest'
-        run: cd dist && zip -r basic-scraper-mac.zip basic-scraper
+        run: cd dist && zip -r strigil-mac.zip strigil
       - name: Create install package (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: tar -czf dist/basic-scraper-linux.tar.gz -C dist basic-scraper
+        run: tar -czf dist/strigil-linux.tar.gz -C dist strigil
       - name: Upload folder artifact
         uses: actions/upload-artifact@v4
         with:
-          name: basic-scraper-${{ matrix.os }}
-          path: dist/basic-scraper/
+          name: strigil-${{ matrix.os }}
+          path: dist/strigil/
       - name: Upload install package
         uses: actions/upload-artifact@v4
         with:
-          name: basic-scraper-${{ matrix.os }}-install
+          name: strigil-${{ matrix.os }}-install
           path: |
-            dist/basic-scraper-win.zip
-            dist/basic-scraper-mac.zip
-            dist/basic-scraper-linux.tar.gz
+            dist/strigil-win.zip
+            dist/strigil-mac.zip
+            dist/strigil-linux.tar.gz
 
   docker:
     name: Docker
@@ -62,7 +62,7 @@ jobs:
           context: .
           push: false
           load: true
-          tags: basic-scraper:latest
+          tags: strigil:latest
       - name: Smoke test
         run: |
-          docker run --rm basic-scraper:latest --url https://example.com --out-dir /tmp/out --types text 2>&1 | head -20
+          docker run --rm strigil:latest --url https://example.com --out-dir /tmp/out --types text 2>&1 | head -20

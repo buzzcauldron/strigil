@@ -1,10 +1,11 @@
-"""Dependency checks: prompt user to install if required deps are missing."""
+"""Dependency checks: auto-install missing deps on first run, or prompt if pip unavailable."""
 
 import os
 import subprocess
 import sys
 
-AUTO_INSTALL_ENV = "BASIC_SCRAPER_AUTO_INSTALL_DEPS"
+# Set to "0" or "false" to disable auto-install
+AUTO_INSTALL_ENV = "STRIGIL_AUTO_INSTALL_DEPS"
 
 REQUIRED = [
     ("httpx", "httpx"),
@@ -12,15 +13,22 @@ REQUIRED = [
     ("lxml", "lxml"),
 ]
 
-# (import_name, pip_package_name); order preserved for install (tqdm is in default deps)
+# (import_name, pip_package_name); order preserved for install
 OPTIONAL = [
     ("playwright", "playwright"),
     ("readability", "readability-lxml"),
+    ("tqdm", "tqdm"),
 ]
 
-INSTALL_CMD = "pip install basic-scraper"
+INSTALL_CMD = "pip install strigil"
 INSTALL_CMD_SOURCE = "pip install -e ."
-OPTIONAL_EXTRAS = "pip install basic-scraper[js,readability]"
+OPTIONAL_EXTRAS = "pip install strigil[js,readability]"
+
+
+def _auto_install_enabled() -> bool:
+    """True if auto-install is enabled (default: yes)."""
+    val = os.environ.get(AUTO_INSTALL_ENV, "1").lower()
+    return val not in ("0", "false", "no")
 
 
 def _import(name: str) -> bool:
@@ -32,8 +40,8 @@ def _import(name: str) -> bool:
 
 
 def _try_auto_install(missing: list[str]) -> bool:
-    """If AUTO_INSTALL_ENV is set, run pip install and exit 0. Returns True if we installed and exited."""
-    if os.environ.get(AUTO_INSTALL_ENV, "").lower() not in ("1", "true", "yes"):
+    """If auto-install enabled, run pip install and exit 0. Returns True if we installed and exited."""
+    if not _auto_install_enabled():
         return False
     cmd = [sys.executable, "-m", "pip", "install", "-q"] + missing
     print("Auto-installing dependencies...", file=sys.stderr)
@@ -47,7 +55,7 @@ def _try_auto_install(missing: list[str]) -> bool:
 
 
 def check_required() -> bool:
-    """Verify required dependencies are importable. On failure, print message and exit (or auto-install if env set)."""
+    """Verify required dependencies are importable. On failure, auto-install and exit, or print message and exit."""
     missing = [pip_name for mod_name, pip_name in REQUIRED if not _import(mod_name)]
     if not missing:
         return True
@@ -60,16 +68,16 @@ def check_required() -> bool:
     print("  Or install from source (project directory):", file=sys.stderr)
     print(f"    {INSTALL_CMD_SOURCE}", file=sys.stderr)
     print("", file=sys.stderr)
-    print("  Or set env to auto-install and re-run:", file=sys.stderr)
-    print(f"    {AUTO_INSTALL_ENV}=1 scrape --url ...", file=sys.stderr)
+    print("  Or enable auto-install (default) and re-run:", file=sys.stderr)
+    print(f"    scrape --url ...  # {AUTO_INSTALL_ENV}=0 to disable", file=sys.stderr)
     print("", file=sys.stderr)
     print("  Missing:", ", ".join(missing), file=sys.stderr)
     sys.exit(1)
 
 
 def _try_auto_install_optional() -> None:
-    """If AUTO_INSTALL_ENV is set, install any missing optional deps and continue (no exit)."""
-    if os.environ.get(AUTO_INSTALL_ENV, "").lower() not in ("1", "true", "yes"):
+    """If auto-install enabled, install any missing optional deps and continue (no exit)."""
+    if not _auto_install_enabled():
         return
     missing = [pip_name for mod_name, pip_name in OPTIONAL if not _import(mod_name)]
     if not missing:
@@ -93,7 +101,7 @@ def _try_auto_install_optional() -> None:
 
 
 def ensure_optional() -> None:
-    """If AUTO_INSTALL_ENV is set, install any missing optional deps (no exit). Call after check_required()."""
+    """If auto-install enabled, install any missing optional deps (no exit). Call after check_required()."""
     _try_auto_install_optional()
 
 

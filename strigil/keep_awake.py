@@ -54,7 +54,7 @@ def keep_awake() -> Generator[None, None, None]:
                         [
                             "systemd-inhibit",
                             "--what=sleep:idle",
-                            "--who=basic-scraper",
+                            "--who=strigil",
                             "--why=Scraping",
                             "sleep",
                             "infinity",

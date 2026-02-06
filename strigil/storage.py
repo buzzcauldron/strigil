@@ -26,9 +26,11 @@ def sanitize_basename(url: str, default_ext: str = "") -> str:
     parts = [p for p in path.split("/") if p]
     # IIIF Image API: /.../image/{ident}/full/.../default.jpg -> use {ident}_default.jpg
     # ident can be numeric (4631112) or UUID (ad6c60d9-62da-4624-aae1-fe9096ea67a9)
-    if "/image/" in path and len(parts) >= 2:
+    # Require /full/ to avoid matching non-IIIF URLs like /gallery/image/12345/photo.jpg
+    path_lower = path.lower()
+    if "/image/" in path_lower and "/full/" in path_lower and len(parts) >= 2:
         try:
-            idx = next(i for i, p in enumerate(parts) if p == "image")
+            idx = next(i for i, p in enumerate(parts) if p.lower() == "image")
             if idx + 1 < len(parts):
                 ident = parts[idx + 1]
                 is_uuid = (

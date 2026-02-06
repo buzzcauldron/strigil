@@ -1,4 +1,4 @@
-"""CLI entry point for the scraper. Invoked as `scrape` when installed with pip install -e ."""
+"""Strigil CLI. Invoked as `scrape` when installed with pip install -e ."""
 
 import os
 
@@ -19,8 +19,8 @@ try:
 except ImportError:
     tqdm = None
 
-from web_scraper._deps import check_required, ensure_optional, optional_hint
-from web_scraper.hardware import (
+from strigil._deps import check_required, ensure_optional, optional_hint
+from strigil.hardware import (
     AGGRESSIVENESS_CHOICES,
     default_workers,
     detect_hardware,
@@ -28,8 +28,8 @@ from web_scraper.hardware import (
     get_aggressiveness_params,
     suggest_aggressiveness,
 )
-from web_scraper.keep_awake import keep_awake
-from web_scraper.pipeline import (
+from strigil.keep_awake import keep_awake
+from strigil.pipeline import (
     VALID_TYPES,
     crawl_parallel,
     parse_size,

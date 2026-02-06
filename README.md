@@ -1,8 +1,8 @@
-# basic-scraper
+# strigil
 
-Basic scraper: PDFs, text, and images from websites at high quality, stored locally.
+Strigil: PDFs, text, and images from websites at high quality, stored locally.
 
-**Author:** Seth Strickland · **License:** [MIT](LICENSE)
+**Repository:** [strigil](https://github.com/sethstrickland/strigil) · **Author:** Seth Strickland · **License:** [MIT](LICENSE)
 
 ## License
 
@@ -49,16 +49,12 @@ Use `--keep-awake` to prevent system/display sleep during long scrapes. On Linux
 
 ### If dependencies are missing
 
-When you run `scrape` or `scrape-gui`, the app checks that required dependencies (httpx, beautifulsoup4, lxml) are installed. If any are missing, it prints install instructions and exits.
+When you run `scrape` or `scrape-gui`, the app auto-installs missing dependencies on first run. Required deps (httpx, beautifulsoup4, lxml) are installed and the app exits—run the command again. Optional deps (Playwright, tqdm, readability-lxml) are installed and the app continues. Set `STRIGIL_AUTO_INSTALL_DEPS=0` to disable auto-install.
 
-- **From PyPI:** `pip install basic-scraper`
+- **From PyPI:** `pip install strigil`
 - **From source:** `pip install -e .` (in the project directory)
-- **Auto-install:** set the env var and re-run; the app will run `pip install` for required deps and exit—run the command again after that. On subsequent runs, if the var is set, missing optional deps (Playwright, tqdm, readability-lxml) are installed automatically and the app continues:
-  ```bash
-  BASIC_SCRAPER_AUTO_INSTALL_DEPS=1 scrape --url https://example.com
-  ```
 
-An optional one-line hint is shown if Playwright is not installed (for JS rendering).
+If Playwright is not installed, an optional hint is shown for JS rendering (`--js`).
 
 ### Workers and hardware autodetect
 
@@ -90,10 +86,10 @@ To build a standalone folder with the CLI and GUI (no Python required on the tar
 
 ```bash
 pip install -e ".[bundle]"
-pyinstaller basic-scraper.spec
+pyinstaller strigil.spec
 ```
 
-Output is in `dist/basic-scraper/`: run `scrape` or `scrape-gui` from that folder. The GUI uses the bundled `scrape` executable in the same directory when you click Scrape.
+Output is in `dist/strigil/`: run `scrape` or `scrape-gui` from that folder. The GUI uses the bundled `scrape` executable in the same directory when you click Scrape.
 
 ### Install packages (Mac, Windows, Linux)
 
@@ -101,19 +97,19 @@ Build an install package for the current platform (folder + archive):
 
 | Platform | Script | Output |
 |----------|--------|--------|
-| **macOS** | `./scripts/build_mac.sh` | `dist/basic-scraper-mac.zip` |
-| **Linux** | `./scripts/build_linux.sh` | `dist/basic-scraper-linux.tar.gz` |
-| **Windows** | `scripts\build_windows.bat` | `dist\basic-scraper-win.zip` |
+| **macOS** | `./scripts/build_mac.sh` | `dist/strigil-mac.zip` |
+| **Linux** | `./scripts/build_linux.sh` | `dist/strigil-linux.tar.gz` |
+| **Windows** | `scripts\build_windows.bat` | `dist\strigil-win.zip` |
 
-Each script runs `pip install -e ".[bundle]"`, `pyinstaller basic-scraper.spec`, then creates the archive. Unzip (or unpack the tarball) and run `scrape` or `scrape-gui` from the `basic-scraper` folder.
+Each script runs `pip install -e ".[bundle]"`, `pyinstaller strigil.spec`, then creates the archive. Unzip (or unpack the tarball) and run `scrape` or `scrape-gui` from the `strigil` folder.
 
 ## Docker
 
 Light image (CLI only, no GUI):
 
 ```bash
-docker build -t basic-scraper .
-docker run --rm -v "$(pwd)/output:/scrape/output" basic-scraper --url https://example.com --out-dir /scrape/output
+docker build -t strigil .
+docker run --rm -v "$(pwd)/output:/scrape/output" strigil --url https://example.com --out-dir /scrape/output
 ```
 
 Override the default URL and options by passing args after the image name.
@@ -123,8 +119,8 @@ Override the default URL and options by passing args after the image name.
 On push/PR to `main` or `master`, GitHub Actions:
 
 - Builds PyInstaller bundles on **Ubuntu, macOS, and Windows** and uploads:
-  - **basic-scraper-&lt;os&gt;** – the `dist/basic-scraper/` folder
-  - **basic-scraper-&lt;os&gt;-install** – install package: `basic-scraper-win.zip`, `basic-scraper-mac.zip`, or `basic-scraper-linux.tar.gz`
+  - **strigil-&lt;os&gt;** – the `dist/strigil/` folder
+  - **strigil-&lt;os&gt;-install** – install package: `strigil-win.zip`, `strigil-mac.zip`, or `strigil-linux.tar.gz`
 - Builds the **Docker** image and runs a quick smoke test.
 
 See [.github/workflows/build.yml](.github/workflows/build.yml).

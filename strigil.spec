@@ -1,6 +1,6 @@
-# PyInstaller spec: build CLI and GUI into one folder (dist/basic-scraper/).
-# Run from project root: pyinstaller basic-scraper.spec
-# Requires: pip install basic-scraper[bundle]
+# PyInstaller spec: build CLI and GUI into one folder (dist/strigil/).
+# Run from project root: pyinstaller strigil.spec
+# Requires: pip install strigil[bundle]
 
 import os
 
@@ -8,10 +8,10 @@ SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 PROJECT_ROOT = SPEC_DIR
 
 hidden_imports = [
-    "web_scraper",
-    "web_scraper.cli",
-    "web_scraper.gui",
-    "web_scraper._deps",
+    "strigil",
+    "strigil.cli",
+    "strigil.gui",
+    "strigil._deps",
     "httpx",
     "bs4",
     "lxml",
@@ -57,5 +57,5 @@ coll = COLLECT(
     a_cli.datas,
     a_gui.binaries,
     a_gui.datas,
-    name="basic-scraper",
+    name="strigil",
 )

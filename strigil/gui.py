@@ -1,4 +1,4 @@
-"""Minimal GUI for the basic scraper. Run with: scrape-gui"""
+"""Minimal GUI for Strigil. Run with: scrape-gui"""
 
 import os
 import queue
@@ -11,14 +11,14 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
-from web_scraper._deps import check_required, ensure_optional
-from web_scraper.hardware import (
+from strigil._deps import check_required, ensure_optional
+from strigil.hardware import (
     default_workers,
     get_aggressiveness_params,
     suggest_aggressiveness,
 )
 
-LAST_URLS_FILE = Path.home() / ".basic-scraper" / "last_urls.txt"
+LAST_URLS_FILE = Path.home() / ".strigil" / "last_urls.txt"
 
 
 def _load_last_urls() -> str:
@@ -71,29 +71,68 @@ def main() -> None:
     check_required()
     ensure_optional()
     root = tk.Tk()
-    root.title("Basic Scraper")
+    root.title("Strigil")
     root.minsize(400, 320)
 
     main_frame = ttk.Frame(root, padding=10)
     main_frame.pack(fill=tk.BOTH, expand=True)
 
-    ttk.Label(main_frame, text="URLs (one per line)").grid(row=0, column=0, sticky=tk.NW, pady=(0, 2))
-    url_text = tk.Text(main_frame, height=4, width=50, wrap=tk.WORD)
+    bottom_frame = ttk.Frame(main_frame)
+    bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=0, pady=(8, 0))
+
+    content_frame = ttk.Frame(main_frame)
+    content_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    url_row = ttk.Frame(content_frame)
+    url_row.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=(0, 2))
+    ttk.Label(url_row, text="URLs (one per line)").pack(side=tk.LEFT)
+    content_frame.columnconfigure(0, weight=1)
+    urls_mode_var = tk.StringVar(value="sequential")
+    urls_mode_frame = ttk.Frame(url_row)
+    urls_mode_frame.pack(side=tk.RIGHT)
+    ttk.Label(urls_mode_frame, text="Run:").pack(side=tk.LEFT, padx=(8, 4))
+    ttk.Radiobutton(urls_mode_frame, text="Sequential", variable=urls_mode_var, value="sequential").pack(side=tk.LEFT)
+    ttk.Radiobutton(urls_mode_frame, text="Parallel", variable=urls_mode_var, value="parallel").pack(side=tk.LEFT, padx=(4, 0))
+
+    url_text = tk.Text(content_frame, height=4, width=50, wrap=tk.WORD)
     url_text.insert("1.0", _load_last_urls())
     url_text.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
 
-    ttk.Label(main_frame, text="Output directory").grid(row=2, column=0, sticky=tk.W, pady=(0, 2))
-    out_row = ttk.Frame(main_frame)
+    def _url_context_menu(event: tk.Event) -> None:
+        menu = tk.Menu(root, tearoff=0)
+        menu.add_command(label="Cut", command=lambda: url_text.event_generate("<<Cut>>"))
+        menu.add_command(label="Copy", command=lambda: url_text.event_generate("<<Copy>>"))
+        menu.add_command(label="Paste", command=lambda: url_text.event_generate("<<Paste>>"))
+        menu.add_separator()
+        menu.add_command(
+            label="Replace selection with clipboard",
+            command=lambda: _replace_selection_with_clipboard(url_text, root),
+        )
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _replace_selection_with_clipboard(text_widget: tk.Text, w: tk.Tk) -> None:
+        try:
+            clip = w.clipboard_get()
+        except tk.TclError:
+            return
+        if text_widget.tag_ranges(tk.SEL):
+            text_widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
+        text_widget.insert(tk.INSERT, clip)
+
+    url_text.bind("<Button-3>", _url_context_menu)
+
+    ttk.Label(content_frame, text="Output directory").grid(row=2, column=0, sticky=tk.W, pady=(0, 2))
+    out_row = ttk.Frame(content_frame)
     out_row.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
-    main_frame.columnconfigure(0, weight=1)
+    content_frame.columnconfigure(0, weight=1)
     out_var = tk.StringVar(value="output")
     out_entry = ttk.Entry(out_row, textvariable=out_var, width=50)
     out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
     ttk.Button(out_row, text="Open folder", command=lambda: _open_folder(out_var.get())).pack(side=tk.LEFT)
 
-    ttk.Label(main_frame, text="Done script (optional, use {out_dir})").grid(row=4, column=0, sticky=tk.W, pady=(8, 2))
+    ttk.Label(content_frame, text="Done script (optional, use {out_dir})").grid(row=4, column=0, sticky=tk.W, pady=(8, 2))
     done_script_var = tk.StringVar(value="")
-    done_script_entry = ttk.Entry(main_frame, textvariable=done_script_var, width=50)
+    done_script_entry = ttk.Entry(content_frame, textvariable=done_script_var, width=50)
     done_script_entry.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
 
     suggest_var = tk.BooleanVar(value=False)
@@ -113,14 +152,14 @@ def main() -> None:
         same_domain_var.set(True)
 
     suggest_cb = ttk.Checkbutton(
-        main_frame,
+        content_frame,
         text="Suggest likely choices",
         variable=suggest_var,
         command=apply_suggested,
     )
     suggest_cb.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
 
-    types_frame = ttk.LabelFrame(main_frame, text="File types")
+    types_frame = ttk.LabelFrame(content_frame, text="File types")
     types_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
     type_pdf_var = tk.BooleanVar(value=True)
     type_text_var = tk.BooleanVar(value=True)
@@ -129,7 +168,7 @@ def main() -> None:
     ttk.Checkbutton(types_frame, text="Text", variable=type_text_var).pack(side=tk.LEFT, padx=(0, 12))
     ttk.Checkbutton(types_frame, text="Images", variable=type_images_var).pack(side=tk.LEFT)
 
-    size_frame = ttk.LabelFrame(main_frame, text="Image size (include)")
+    size_frame = ttk.LabelFrame(content_frame, text="Image size (include)")
     size_frame.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
     size_small_var = tk.BooleanVar(value=True)
     size_medium_var = tk.BooleanVar(value=True)
@@ -138,7 +177,7 @@ def main() -> None:
     ttk.Checkbutton(size_frame, text="Medium (100 KB – 1 MB)", variable=size_medium_var).pack(side=tk.LEFT, padx=(0, 12))
     ttk.Checkbutton(size_frame, text="Large (> 1 MB)", variable=size_large_var).pack(side=tk.LEFT)
 
-    opts_frame = ttk.Frame(main_frame)
+    opts_frame = ttk.Frame(content_frame)
     opts_frame.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
     suggested = suggest_aggressiveness()
     initial_params = get_aggressiveness_params("auto")
@@ -188,15 +227,15 @@ def main() -> None:
 
     keep_awake_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(
-        main_frame,
+        content_frame,
         text="Keep system awake (for long scrapes)",
         variable=keep_awake_var,
     ).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
 
-    log_frame = ttk.LabelFrame(main_frame, text="Log")
+    log_frame = ttk.LabelFrame(content_frame, text="Log")
     log_frame.grid(row=11, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
-    main_frame.columnconfigure(0, weight=1)
-    main_frame.rowconfigure(11, weight=1)
+    content_frame.columnconfigure(0, weight=1)
+    content_frame.rowconfigure(11, weight=1)
 
     log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
     log_scroll = ttk.Scrollbar(log_frame)
@@ -216,12 +255,11 @@ def main() -> None:
         log_text.delete("1.0", tk.END)
         log_text.config(state=tk.DISABLED)
 
-    # Status bar: scanning + scraping
-    status_frame = ttk.Frame(main_frame)
-    status_frame.grid(row=12, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
-    main_frame.columnconfigure(0, weight=1)
+    # Status bar and buttons (in bottom_frame, packed first so they stay visible when maximized)
+    status_frame = ttk.Frame(bottom_frame)
     scan_status_var = tk.StringVar(value="")
     scrape_status_var = tk.StringVar(value="")
+    status_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
     ttk.Label(status_frame, text="Scan:").pack(side=tk.LEFT, padx=(0, 4))
     ttk.Label(status_frame, textvariable=scan_status_var).pack(side=tk.LEFT, padx=(0, 16))
     ttk.Label(status_frame, text="Scrape:").pack(side=tk.LEFT, padx=(0, 4))
@@ -229,6 +267,8 @@ def main() -> None:
 
     output_queue: queue.Queue[str | None] = queue.Queue()
     current_proc: list[subprocess.Popen | None] = [None]
+    current_procs: list[subprocess.Popen] = []
+    procs_lock = threading.Lock()
 
     def run_scrape(scrape_btn_ref: tk.Widget, stop_btn_ref: tk.Widget) -> None:
         urls = [
@@ -244,6 +284,7 @@ def main() -> None:
         scan_status_var.set("Scanning resources...")
         scrape_status_var.set("—")
         scrape_counts: list[int] = [0, 0, 0]  # pdf, text, images
+        run_parallel = urls_mode_var.get() == "parallel" and len(urls) > 1
 
         def update_status(line: str) -> None:
             if "Running:" in line or "Scrape:" in line or "Iteration" in line:
@@ -253,9 +294,9 @@ def main() -> None:
             elif "→ Downloading" in line:
                 scan_status_var.set("Downloading assets...")
             elif "  [" in line and "/" in line and "] " in line:
-                # Parse [3/12] style progress
+                # Parse [3/12] style progress (require "  " prefix to skip parallel URL prefix e.g. [1/3])
                 scan_status_var.set("Downloading assets...")
-                m = re.search(r"\[(\d+)/(\d+)\]", line)
+                m = re.search(r"  \[(\d+)/(\d+)\]", line)
                 if m:
                     scrape_status_var.set(f"{m.group(1)}/{m.group(2)} assets")
             elif "  Text:" in line:
@@ -285,14 +326,9 @@ def main() -> None:
         if getattr(sys, "frozen", False):
             base = os.path.dirname(sys.executable)
             scrape_bin = os.path.join(base, "scrape.exe" if sys.platform == "win32" else "scrape")
-            cmd = [scrape_bin]
+            base_cmd = [scrape_bin]
         else:
-            cmd = [sys.executable, "-m", "web_scraper.cli"]
-        cmd.extend(["--url"] + urls)
-        cmd.extend([
-            "--out-dir", out_var.get().strip() or "output",
-            "--delay", str(delay),
-        ])
+            base_cmd = [sys.executable, "-m", "strigil.cli"]
         selected_types = []
         if type_pdf_var.get():
             selected_types.append("pdf")
@@ -301,97 +337,179 @@ def main() -> None:
         if type_images_var.get():
             selected_types.append("images")
         if selected_types and len(selected_types) < 3:
-            cmd.append("--types")
-            cmd.extend(selected_types)
+            pass
         elif not selected_types:
             append_log("Error: Select at least one file type.\n")
             scrape_btn_ref.config(state=tk.NORMAL)
             return
-        # Union of selected size ranges -> --min-image-size / --max-image-size
+
         def _size_to_arg(n: int) -> str:
             if n >= 1024 * 1024:
                 return f"{n // (1024 * 1024)}m"
             if n >= 1024:
                 return f"{n // 1024}k"
             return str(n)
-        lows: list[int] = []
-        highs: list[int | None] = []
-        if size_small_var.get():
-            lows.append(0)
-            highs.append(SIZE_SMALL_MAX)
-        if size_medium_var.get():
-            lows.append(SIZE_MEDIUM_MIN)
-            highs.append(SIZE_MEDIUM_MAX)
-        if size_large_var.get():
-            lows.append(SIZE_LARGE_MIN)
-            highs.append(None)  # no max
-        if lows:
-            low = min(lows)
-            high = None if None in highs else max(h for h in highs if h is not None)
-            if low > 0:
-                cmd.extend(["--min-image-size", _size_to_arg(low)])
-            if high is not None:
-                cmd.extend(["--max-image-size", _size_to_arg(high)])
-        if crawl_var.get():
-            cmd.extend(["--crawl", "--max-depth", str(depth)])
-            try:
-                w = int(workers_var.get())
-                w = max(1, min(12, w))
-                cmd.extend(["--workers", str(w)])
-            except (ValueError, tk.TclError):
-                pass
-            if same_domain_var.get():
-                cmd.append("--same-domain-only")
-        done_script = done_script_var.get().strip()
-        if done_script:
-            cmd.extend(["--done-script", done_script])
-        if keep_awake_var.get():
-            cmd.append("--keep-awake")
 
-        def worker() -> None:
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-                current_proc[0] = proc
-                if proc.stdout:
-                    for line in proc.stdout:
-                        output_queue.put(line)
-            except Exception as e:
-                output_queue.put(f"Error: {e}\n")
-            finally:
-                current_proc[0] = None
-            output_queue.put(None)
+        def build_cmd(url_list: list[str]) -> list[str]:
+            c = base_cmd + ["--url"] + url_list + [
+                "--out-dir", out_var.get().strip() or "output",
+                "--delay", str(delay),
+            ]
+            if selected_types and len(selected_types) < 3:
+                c.extend(["--types"] + selected_types)
+            lows: list[int] = []
+            highs: list[int | None] = []
+            if size_small_var.get():
+                lows.append(0)
+                highs.append(SIZE_SMALL_MAX)
+            if size_medium_var.get():
+                lows.append(SIZE_MEDIUM_MIN)
+                highs.append(SIZE_MEDIUM_MAX)
+            if size_large_var.get():
+                lows.append(SIZE_LARGE_MIN)
+                highs.append(None)
+            if lows:
+                low = min(lows)
+                high = None if None in highs else max(h for h in highs if h is not None)
+                if low > 0:
+                    c.extend(["--min-image-size", _size_to_arg(low)])
+                if high is not None:
+                    c.extend(["--max-image-size", _size_to_arg(high)])
+            if crawl_var.get():
+                c.extend(["--crawl", "--max-depth", str(depth)])
+                try:
+                    w = int(workers_var.get())
+                    w = max(1, min(12, w))
+                    c.extend(["--workers", str(w)])
+                except (ValueError, tk.TclError):
+                    pass
+                if same_domain_var.get():
+                    c.append("--same-domain-only")
+            done_script = done_script_var.get().strip()
+            if done_script and not run_parallel:
+                c.extend(["--done-script", done_script])
+            if keep_awake_var.get():
+                c.append("--keep-awake")
+            return c
 
-        def poll_queue(btn: tk.Widget) -> None:
-            saw_done = False
-            try:
-                while True:
-                    line = output_queue.get_nowait()
-                    if line is None:
-                        saw_done = True
-                        break
-                    root.after(0, lambda l=line: (append_log(l), update_status(l)))
-            except queue.Empty:
-                pass
-            if saw_done:
-                root.after(0, lambda: (stop_btn_ref.config(state=tk.DISABLED), btn.config(state=tk.NORMAL)))
-            else:
-                root.after(150, lambda: poll_queue(btn))
+        if run_parallel:
+            current_procs.clear()
+            num_urls = len(urls)
+            parallel_done_count: list[int] = [0]
 
-        append_log(f"Running: {' '.join(cmd)}\n\n")
-        stop_btn.config(state=tk.NORMAL)
-        threading.Thread(target=worker, daemon=True).start()
-        poll_queue(scrape_btn_ref)
+            def parallel_worker(idx: int, url: str) -> None:
+                cmd = build_cmd([url])
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    with procs_lock:
+                        current_procs.append(proc)
+                    prefix = f"[{idx + 1}/{num_urls}] "
+                    if proc.stdout:
+                        for line in proc.stdout:
+                            output_queue.put(prefix + line)
+                except Exception as e:
+                    output_queue.put(f"[{idx + 1}/{num_urls}] Error: {e}\n")
+                finally:
+                    output_queue.put(None)
 
-    btn_frame = ttk.Frame(main_frame)
-    btn_frame.grid(row=13, column=0, columnspan=2)
+            append_log(f"Running {num_urls} URLs in parallel.\n\n")
+            stop_btn.config(state=tk.NORMAL)
+            for i, u in enumerate(urls):
+                t = threading.Thread(target=parallel_worker, args=(i, u), daemon=True)
+                t.start()
+
+            def poll_queue_parallel(btn: tk.Widget) -> None:
+                try:
+                    while True:
+                        line = output_queue.get_nowait()
+                        if line is None:
+                            parallel_done_count[0] += 1
+                            if parallel_done_count[0] >= num_urls:
+                                break
+                        else:
+                            root.after(0, lambda l=line: (append_log(l), update_status(l)))
+                except queue.Empty:
+                    pass
+                if parallel_done_count[0] >= num_urls:
+                    ds = done_script_var.get().strip()
+                    if ds:
+                        root.after(0, lambda: run_done_script_async(ds, out_var.get().strip() or "output"))
+                    root.after(0, lambda: (stop_btn_ref.config(state=tk.DISABLED), btn.config(state=tk.NORMAL)))
+                else:
+                    root.after(150, lambda: poll_queue_parallel(btn))
+
+            def run_done_script_async(script: str, out: str) -> None:
+                if not script:
+                    return
+                import subprocess as sp
+                cmd = script.strip().replace("{out_dir}", os.path.abspath(out))
+                try:
+                    sp.run(cmd, shell=True, check=False)
+                except Exception:
+                    pass
+
+            poll_queue_parallel(scrape_btn_ref)
+        else:
+            cmd = build_cmd(urls)
+
+            def worker() -> None:
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    current_proc[0] = proc
+                    if proc.stdout:
+                        for line in proc.stdout:
+                            output_queue.put(line)
+                except Exception as e:
+                    output_queue.put(f"Error: {e}\n")
+                finally:
+                    current_proc[0] = None
+                output_queue.put(None)
+
+            def poll_queue(btn: tk.Widget) -> None:
+                saw_done = False
+                try:
+                    while True:
+                        line = output_queue.get_nowait()
+                        if line is None:
+                            saw_done = True
+                            break
+                        root.after(0, lambda l=line: (append_log(l), update_status(l)))
+                except queue.Empty:
+                    pass
+                if saw_done:
+                    root.after(0, lambda: (stop_btn_ref.config(state=tk.DISABLED), btn.config(state=tk.NORMAL)))
+                else:
+                    root.after(150, lambda: poll_queue(btn))
+
+            append_log(f"Running: {' '.join(cmd)}\n\n")
+            stop_btn.config(state=tk.NORMAL)
+            threading.Thread(target=worker, daemon=True).start()
+            poll_queue(scrape_btn_ref)
+
+    btn_frame = ttk.Frame(bottom_frame)
+    btn_frame.pack(side=tk.RIGHT)
 
     def do_stop() -> None:
+        with procs_lock:
+            procs = list(current_procs)
+            current_procs.clear()
+        for p in procs:
+            try:
+                p.terminate()
+            except Exception:
+                pass
         if current_proc[0] is not None:
             try:
                 current_proc[0].terminate()

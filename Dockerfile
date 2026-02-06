@@ -1,8 +1,8 @@
-# Light image for basic-scraper (CLI only, no GUI). Multi-stage to keep size down.
+# Light image for strigil (CLI only, no GUI). Multi-stage to keep size down.
 FROM python:3.12-slim AS builder
 WORKDIR /app
 COPY pyproject.toml ./
-COPY web_scraper/ ./web_scraper/
+COPY strigil/ ./strigil/
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir .
 

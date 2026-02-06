@@ -3,7 +3,7 @@
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
-USER_AGENT = "WebScraper/1.0 (+https://github.com/; high-quality PDF/text/image scraper)"
+USER_AGENT = "Strigil/1.0 (+https://github.com/sethstrickland/strigil; PDF/text/image scraper)"
 
 # Cache: RobotFileParser on success, None when fetch failed (treat as allow-all)
 _robots_cache: dict[tuple[str, str], RobotFileParser | None] = {}

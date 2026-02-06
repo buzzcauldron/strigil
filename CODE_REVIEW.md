@@ -1,4 +1,4 @@
-# Code review: web-scraper vs Morgan Library pages
+# Code review: strigil vs Morgan Library pages
 
 **Tested URLs (all succeeded with `--js`):**
 

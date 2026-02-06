@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Build Linux install package. Run from project root:
 #   ./scripts/build_linux.sh
-# Output: dist/basic-scraper-linux.tar.gz (and dist/basic-scraper/)
+# Output: dist/strigil-linux.tar.gz (and dist/strigil/)
 
 set -e
 cd "$(dirname "$0")/.."
-echo "Building basic-scraper for Linux..."
+echo "Building strigil for Linux..."
 pip install -e ".[bundle]" -q
-pyinstaller basic-scraper.spec
-DIST=dist/basic-scraper
-OUT=dist/basic-scraper-linux.tar.gz
+pyinstaller strigil.spec
+DIST=dist/strigil
+OUT=dist/strigil-linux.tar.gz
 rm -f "$OUT"
-tar -czf "$OUT" -C dist basic-scraper
+tar -czf "$OUT" -C dist strigil
 echo "Done: $OUT"

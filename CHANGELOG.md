@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed
+- Renamed package from basic-scraper to strigil. Install with `pip install strigil`.
+- Config dir: `~/.basic-scraper/` → `~/.strigil/`.
+- Env var: `BASIC_SCRAPER_AUTO_INSTALL_DEPS` → `STRIGIL_AUTO_INSTALL_DEPS`.
+- Auto-install dependencies on first run by default. Required deps are installed and the app exits; optional deps (playwright, tqdm, readability-lxml) are installed and the app continues. Set `STRIGIL_AUTO_INSTALL_DEPS=0` to disable.
+- Repository branding: project URLs, USER_AGENT, and README updated to strigil.
+
 ## [0.3.0] - 2025-02-04
 
 ### Added
@@ -31,7 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - GUI (tkinter) with file-type selector, image size filter, and Open folder button.
 - CLI: `--types` (pdf/text/images), `--min-image-size` / `--max-image-size`, `--workers`, `--no-progress`.
-- Auto-install deps via `BASIC_SCRAPER_AUTO_INSTALL_DEPS=1`.
+- Auto-install deps via `STRIGIL_AUTO_INSTALL_DEPS=1`.
 - Hardware-autodetected parallel crawl; progress bar (optional tqdm).
 - Docker image (slim) and GitHub Actions (PyInstaller + Docker).
 - License: MIT, Copyright (c) 2025 Seth Strickland.

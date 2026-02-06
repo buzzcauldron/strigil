@@ -55,6 +55,14 @@ class Fetcher:
         # Page URL from last fetch_html; sent as Referer on asset requests to reduce 403s
         self._page_url: str | None = None
 
+    def spawn(self) -> "Fetcher":
+        """Return a new Fetcher with the same config (for use in another thread)."""
+        return Fetcher(
+            timeout=self._timeout,
+            headers=self._headers,
+            use_browser=self._use_browser,
+        )
+
     def _get_client(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
             self._client = httpx.Client(
@@ -72,7 +80,7 @@ class Fetcher:
             from playwright.sync_api import sync_playwright
         except ImportError as e:
             raise RuntimeError(
-                "Browser fetch (--js) requires: pip install basic-scraper[js] && playwright install"
+                "Browser fetch (--js) requires: pip install strigil[js] && playwright install"
             ) from e
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=True)

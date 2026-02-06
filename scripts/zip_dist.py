@@ -1,11 +1,11 @@
-"""Zip dist/basic-scraper into dist/basic-scraper-win.zip. Used by build_windows.bat."""
+"""Zip dist/strigil into dist/strigil-win.zip. Used by build_windows.bat."""
 import zipfile
 from pathlib import Path
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    src = root / "dist" / "basic-scraper"
-    out = root / "dist" / "basic-scraper-win.zip"
+    src = root / "dist" / "strigil"
+    out = root / "dist" / "strigil-win.zip"
     if not src.is_dir():
         raise SystemExit(f"Missing {src}")
     out.unlink(missing_ok=True)

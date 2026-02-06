@@ -8,7 +8,7 @@ from typing import Callable
 
 from bs4 import BeautifulSoup
 
-from web_scraper.extractors import (
+from strigil.extractors import (
     find_contentdm_full_res_urls,
     find_derived_iiif_manifest_urls,
     find_image_urls,

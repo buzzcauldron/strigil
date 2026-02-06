@@ -3,9 +3,9 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "basic-scraper"
+name = "strigil"
 version = "0.2.0"
-description = "Basic scraper: PDFs, text, and images from websites at high quality, stored locally."
+description = "Strigil: PDFs, text, and images from websites at high quality, stored locally."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -23,10 +23,14 @@ js = ["playwright"]
 bundle = ["pyinstaller>=6.0"]
 progress = ["tqdm"]
 
+[project.urls]
+Homepage = "https://github.com/sethstrickland/strigil"
+Repository = "https://github.com/sethstrickland/strigil"
+
 [project.scripts]
-scrape = "web_scraper.cli:main"
-scrape-gui = "web_scraper.gui:main"
+scrape = "strigil.cli:main"
+scrape-gui = "strigil.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["web_scraper*"]
+include = ["strigil*"]

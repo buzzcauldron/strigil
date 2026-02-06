@@ -19,17 +19,17 @@ try:
 except ImportError:
     tqdm = None
 
-from web_scraper.discovery import collect_image_urls
-from web_scraper.extractors import (
+from strigil.discovery import collect_image_urls
+from strigil.extractors import (
     find_page_links,
     find_pdf_urls,
     extract_text,
     get_best_image_url,
 )
-from web_scraper.fetcher import DEFAULT_TIMEOUT, Fetcher, MAX_TIMEOUT
-from web_scraper.hardware import SAFE_ASSET_WORKERS, SAFE_HEAD_WORKERS
-from web_scraper.robots import can_fetch
-from web_scraper.storage import (
+from strigil.fetcher import DEFAULT_TIMEOUT, Fetcher, MAX_TIMEOUT
+from strigil.hardware import SAFE_ASSET_WORKERS, SAFE_HEAD_WORKERS
+from strigil.robots import can_fetch
+from strigil.storage import (
     load_manifest,
     manifest_path,
     path_exists_for_resource,
@@ -91,6 +91,21 @@ def _effective_asset_workers_for_tasks(
     if large_count >= LARGE_IIIF_MIN_COUNT and large_count >= len(image_tasks) // 2:
         return 1
     return min(requested, SAFE_ASSET_WORKERS, len(tasks) or 1)
+
+
+def _should_skip_existing_by_size(
+    fetcher: Fetcher, fetch_url: str, canon_path: Path, *, delay: float = 0
+) -> bool:
+    """True if file at canon_path exists and its size matches remote Content-Length."""
+    if not canon_path.exists():
+        return False
+    try:
+        _, content_length = fetcher.head_metadata(fetch_url, delay=delay)
+        if content_length is not None and content_length == canon_path.stat().st_size:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 @dataclass
@@ -174,7 +189,12 @@ def map_page(
 
     image_items: list[tuple[str, str, str]] = []
     if "images" in want:
-        fetch_manifest = lambda u: fetcher.fetch_html(u, delay=delay)[0]
+        # Manifest URLs return JSON; use httpx (not browser) so we get raw JSON
+        def fetch_manifest(u: str) -> bytes:
+            if use_browser:
+                with Fetcher(use_browser=False) as f:
+                    return f.fetch_html(u, delay=0)[0]
+            return fetcher.fetch_html(u, delay=delay)[0]
         img_urls = collect_image_urls(soup, url, html_str, fetch_manifest=fetch_manifest, limit=limit_images)
 
         need_size_filter = min_image_size is not None or max_image_size is not None
@@ -254,10 +274,10 @@ def scrape_assets(
 
     work: list[tuple[str, str, str | None]] = []  # (url, best_url, ct)
     for u in result.pdf_urls:
-        if u not in urls_map and not _exists(u, "pdf"):
+        if u not in urls_map:
             work.append((u, u, "application/pdf"))
     for img_url, best_url, ct in result.image_items:
-        if img_url not in urls_map and not _exists(img_url, "image", ct):
+        if img_url not in urls_map:
             work.append((img_url, best_url, ct))
 
     n_pdf = sum(1 for _, _, ct in work if ct == "application/pdf")
@@ -287,12 +307,16 @@ def scrape_assets(
         if url in urls_map:
             return True
         is_pdf = ct == "application/pdf"
-        kind = "pdf" if is_pdf else "image"
-        if _exists(url, kind, None if is_pdf else ct):
-            canon = path_for_pdf_canonical(out_dir, domain, url) if is_pdf else path_for_image_canonical(out_dir, domain, url, ct)
-            urls_map[url] = str(canon)
-            return True
-        dest = path_for_pdf(out_dir, domain, best_url) if is_pdf else path_for_image(out_dir, domain, best_url, ct)
+        canon = path_for_pdf_canonical(out_dir, domain, url) if is_pdf else path_for_image_canonical(out_dir, domain, url, ct)
+        if canon.exists():
+            with fetcher_context() as f:
+                if _should_skip_existing_by_size(f, best_url, canon, delay=delay):
+                    urls_map[url] = str(canon)
+                    types_map[url] = ct or "image"
+                    return True
+            dest = canon  # overwrite when size differs
+        else:
+            dest = path_for_pdf(out_dir, domain, best_url) if is_pdf else path_for_image(out_dir, domain, best_url, ct)
         try:
             with fetcher_context() as f:
                 f.fetch_binary(best_url, dest, delay=delay)
@@ -392,10 +416,9 @@ def scrape_page(
                 break
             if pdf_url in urls_map:
                 continue
-            if path_exists_for_resource(out_dir, domain, pdf_url, "pdf"):
-                urls_map[pdf_url] = str(path_for_pdf_canonical(out_dir, domain, pdf_url))
-                continue
-            pdf_work.append((pdf_url, path_for_pdf(out_dir, domain, pdf_url)))
+            canon = path_for_pdf_canonical(out_dir, domain, pdf_url)
+            dest = canon if canon.exists() else path_for_pdf(out_dir, domain, pdf_url)
+            pdf_work.append((pdf_url, dest))
 
     # Text pipeline (single item, no parallelization)
     if "text" in want:
@@ -404,6 +427,7 @@ def scrape_page(
             if path_exists_for_resource(out_dir, domain, url, "text"):
                 dest = path_for_text_canonical(out_dir, domain, url)
                 urls_map[url] = str(dest)
+                types_map[url] = "text/plain"
             else:
                 dest = path_for_text(out_dir, domain, url)
                 write_text(dest, text)
@@ -436,10 +460,9 @@ def scrape_page(
                         continue
                     if max_image_size is not None and content_length > max_image_size:
                         continue
-            if path_exists_for_resource(out_dir, domain, img_url, "image", ct):
-                urls_map[img_url] = str(path_for_image_canonical(out_dir, domain, img_url, ct))
-                continue
-            image_work.append((img_url, best_url, ct or "image", path_for_image(out_dir, domain, best_url, ct)))
+            canon = path_for_image_canonical(out_dir, domain, img_url, ct)
+            dest = canon if canon.exists() else path_for_image(out_dir, domain, best_url, ct)
+            image_work.append((img_url, best_url, ct or "image", dest))
 
     # Run PDF + image downloads (parallel when asset_workers > 1)
     # Work items: (fetch_url, dest, ct, map_key) for urls_map[map_key] = str(dest)
@@ -453,6 +476,13 @@ def scrape_page(
         pass
     elif asset_workers <= 1:
         for fetch_url, dest, ct, map_key in asset_tasks:
+            if dest.exists() and _should_skip_existing_by_size(fetcher, fetch_url, dest, delay=delay):
+                urls_map[map_key] = str(dest)
+                types_map[map_key] = ct
+                if progress_callback:
+                    progress_callback("pdf" if ct == "application/pdf" else "image")
+                print(f"  PDF: {fetch_url}" if ct == "application/pdf" else f"  Image: {fetch_url}", file=sys.stderr)
+                continue
             try:
                 fetcher.fetch_binary(fetch_url, dest, delay=delay)
                 urls_map[map_key] = str(dest)
@@ -469,54 +499,82 @@ def scrape_page(
                         if progress_callback:
                             progress_callback("image")
                         print(f"  Image: {map_key}", file=sys.stderr)
-                    except Exception:
-                        print(f"  Image fail {map_key}: {e}", file=sys.stderr)
+                    except Exception as inner_e:
+                        print(f"  Image fail {map_key}: {inner_e}", file=sys.stderr)
                 else:
                     print(f"  {'PDF' if ct == 'application/pdf' else 'Image'} fail {map_key}: {e}", file=sys.stderr)
     else:
         effective = _effective_asset_workers_for_tasks(asset_tasks, asset_workers)
         stagger = (delay / effective) if effective > 1 else 0
         manifest_lock = threading.Lock()
+        _thread_local = threading.local()
+        _fetchers_to_close: list[Fetcher] = []
+        _fetchers_lock = threading.Lock()
+
+        def _init_worker() -> None:
+            f = fetcher.spawn()
+            with _fetchers_lock:
+                _fetchers_to_close.append(f)
+            _thread_local.fetcher = f
+
+        def _get_thread_fetcher() -> Fetcher:
+            f = getattr(_thread_local, "fetcher", None)
+            if f is None:
+                f = fetcher.spawn()
+                with _fetchers_lock:
+                    _fetchers_to_close.append(f)
+                _thread_local.fetcher = f
+            return f
 
         def _download_asset(item: tuple[str, Path, str, str], stagger_delay: float) -> tuple[str, Path, str, str] | None:
+            thread_fetcher = _get_thread_fetcher()
             fetch_url, dest, ct, map_key = item
             time.sleep(stagger_delay)
+            if dest.exists() and _should_skip_existing_by_size(thread_fetcher, fetch_url, dest, delay=0):
+                return (map_key, dest, ct, "pdf" if ct == "application/pdf" else "image")
             try:
-                fetcher.fetch_binary(fetch_url, dest, delay=0)
+                thread_fetcher.fetch_binary(fetch_url, dest, delay=0)
                 return (map_key, dest, ct, "pdf" if ct == "application/pdf" else "image")
             except Exception as e:
                 if ct != "application/pdf" and map_key != fetch_url:
                     try:
-                        fetcher.fetch_binary(map_key, dest, delay=0)
+                        thread_fetcher.fetch_binary(map_key, dest, delay=0)
                         return (map_key, dest, ct, "image")
-                    except Exception:
-                        return (map_key, dest, ct, f"fail:{e!s}")
+                    except Exception as inner_e:
+                        return (map_key, dest, ct, f"fail:{inner_e!s}")
                 return (map_key, dest, ct, f"fail:{e!s}")
 
-        with ThreadPoolExecutor(max_workers=effective) as ex:
-            futures = {
-                ex.submit(_download_asset, item, stagger * (i % effective)): item
-                for i, item in enumerate(asset_tasks)
-            }
-            for fut in as_completed(futures):
-                fetch_url, dest, ct, map_key = futures[fut]
+        try:
+            with ThreadPoolExecutor(max_workers=effective, initializer=_init_worker) as ex:
+                futures = {
+                    ex.submit(_download_asset, item, stagger * (i % effective)): item
+                    for i, item in enumerate(asset_tasks)
+                }
+                for fut in as_completed(futures):
+                    fetch_url, dest, ct, map_key = futures[fut]
+                    try:
+                        result = fut.result()
+                    except Exception as e:
+                        print(f"  {'PDF' if ct == 'application/pdf' else 'Image'} fail {map_key}: {e}", file=sys.stderr)
+                        continue
+                    if result is None:
+                        continue
+                    _map_key, _dest, _ct, status = result
+                    with manifest_lock:
+                        urls_map[_map_key] = str(_dest)
+                        types_map[_map_key] = _ct
+                    if status.startswith("fail:"):
+                        print(f"  {'PDF' if _ct == 'application/pdf' else 'Image'} fail {_map_key}: {status[5:]}", file=sys.stderr)
+                    else:
+                        if progress_callback:
+                            progress_callback(status)
+                        print(f"  PDF: {_map_key}" if _ct == "application/pdf" else f"  Image: {_map_key}", file=sys.stderr)
+        finally:
+            for f in _fetchers_to_close:
                 try:
-                    result = fut.result()
-                except Exception as e:
-                    print(f"  {'PDF' if ct == 'application/pdf' else 'Image'} fail {map_key}: {e}", file=sys.stderr)
-                    continue
-                if result is None:
-                    continue
-                _map_key, _dest, _ct, status = result
-                with manifest_lock:
-                    urls_map[_map_key] = str(_dest)
-                    types_map[_map_key] = _ct
-                if status.startswith("fail:"):
-                    print(f"  {'PDF' if _ct == 'application/pdf' else 'Image'} fail {_map_key}: {status[5:]}", file=sys.stderr)
-                else:
-                    if progress_callback:
-                        progress_callback(status)
-                    print(f"  PDF: {_map_key}" if _ct == "application/pdf" else f"  Image: {_map_key}", file=sys.stderr)
+                    f.close()
+                except Exception:
+                    pass
 
     save_manifest(mf_path, manifest)
 
@@ -701,14 +759,14 @@ def run_single_or_sequential_crawl(
                     if is_403(e) and iteration < max_iterations - 1:
                         had_403 = True
                         print(f"  Retrying after 403 (iteration {iteration + 1})...", file=sys.stderr)
-                        if pbar:
+                        if pbar is not None:
                             pbar.close()
                         continue
-                    if pbar:
+                    if pbar is not None:
                         pbar.close()
                     raise
                 finally:
-                    if pbar:
+                    if pbar is not None:
                         pbar.close()
                 break
 
@@ -750,20 +808,19 @@ def crawl_parallel(
             domain = sanitize_domain(url)
             with manifest_lock:
                 manifest = load_manifest(manifest_path(out_dir, domain))
-            try:
-                links = scrape_page(
-                    url, out_dir, delay, manifest, fetcher,
-                    limit, limit, collect_links=True, types=types_set,
-                    progress_callback=None,
-                    min_image_size=min_image_size,
-                    max_image_size=max_image_size,
-                    same_domain_for_links=link_filter,
-                    asset_workers=min(SAFE_ASSET_WORKERS, workers),
-                )
-            except Exception as e:
-                print(f"Error {url}: {e}", file=sys.stderr)
-                return []
-            with manifest_lock:
+                try:
+                    links = scrape_page(
+                        url, out_dir, delay, manifest, fetcher,
+                        limit, limit, collect_links=True, types=types_set,
+                        progress_callback=None,
+                        min_image_size=min_image_size,
+                        max_image_size=max_image_size,
+                        same_domain_for_links=link_filter,
+                        asset_workers=min(SAFE_ASSET_WORKERS, workers),
+                    )
+                except Exception as e:
+                    print(f"Error {url}: {e}", file=sys.stderr)
+                    return []
                 save_manifest(manifest_path(out_dir, domain), manifest)
             return links
 
@@ -798,12 +855,12 @@ def crawl_parallel(
                     finally:
                         with pending_lock:
                             pending -= 1
-                            if pbar:
+                            if pbar is not None:
                                 pbar.set_postfix(pending=pending)
                             if pending == 0:
                                 for _ in range(workers):
                                     work_queue.put(None)
-                        if pbar:
+                        if pbar is not None:
                             pbar.update(1)
                     for link in links:
                         if same_dom and urlparse(link).netloc != start_domain:
@@ -825,7 +882,7 @@ def crawl_parallel(
             futs = [executor.submit(worker) for _ in range(workers)]
             for f in as_completed(futs):
                 f.result()
-        if pbar:
+        if pbar is not None:
             pbar.close()
         return seen
 
