@@ -55,6 +55,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Docker image (slim) and GitHub Actions (PyInstaller + Docker).
 - License: MIT, Copyright (c) 2025 Seth Strickland.
 
-## [0.1.0]
+## [0.1.0] - 2025-02-04
 
 - Initial package layout, CLI stub, and semver setup.
