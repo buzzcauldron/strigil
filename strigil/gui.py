@@ -456,6 +456,16 @@ def main() -> None:
                 c.append("--keep-awake")
             return c
 
+        def log_size_filter() -> None:
+            parts = []
+            if size_small_var.get():
+                parts.append("Small (< 100 KB)")
+            if size_medium_var.get():
+                parts.append("Medium (100 KB–1 MB)")
+            if size_large_var.get():
+                parts.append("Large (> 1 MB)")
+            append_log(f"Size: {', '.join(parts) if parts else 'none'}\n")
+
         if run_parallel:
             current_procs.clear()
             num_urls = len(urls)
@@ -482,6 +492,7 @@ def main() -> None:
                 finally:
                     output_queue.put(None)
 
+            log_size_filter()
             append_log(f"Running {num_urls} URLs in parallel.\n\n")
             stop_btn.config(state=tk.NORMAL)
             for i, u in enumerate(urls):
@@ -557,6 +568,7 @@ def main() -> None:
                 else:
                     root.after(150, lambda: poll_queue(btn))
 
+            log_size_filter()
             append_log(f"Running: {' '.join(cmd)}\n\n")
             stop_btn.config(state=tk.NORMAL)
             threading.Thread(target=worker, daemon=True).start()
