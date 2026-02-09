@@ -274,13 +274,14 @@ def main() -> None:
 
     # Status bar and buttons (in bottom_frame, packed first so they stay visible when maximized)
     status_frame = ttk.Frame(bottom_frame)
-    scan_status_var = tk.StringVar(value="")
-    scrape_status_var = tk.StringVar(value="")
+    state_var = tk.StringVar(value="Idle")  # Idle | Running | Finished
+    progress_var = tk.StringVar(value="—")
     status_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    ttk.Label(status_frame, text="Scan:").pack(side=tk.LEFT, padx=(0, 4))
-    ttk.Label(status_frame, textvariable=scan_status_var).pack(side=tk.LEFT, padx=(0, 16))
-    ttk.Label(status_frame, text="Scrape:").pack(side=tk.LEFT, padx=(0, 4))
-    ttk.Label(status_frame, textvariable=scrape_status_var).pack(side=tk.LEFT)
+    ttk.Label(status_frame, text="Status:").pack(side=tk.LEFT, padx=(0, 4))
+    state_label = ttk.Label(status_frame, textvariable=state_var, font=("", 10, "bold"))
+    state_label.pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Label(status_frame, text="Progress:").pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Label(status_frame, textvariable=progress_var).pack(side=tk.LEFT)
 
     output_queue: queue.Queue[str | None] = queue.Queue()
     current_proc: list[subprocess.Popen | None] = [None]
@@ -298,39 +299,41 @@ def main() -> None:
             return
         _save_last_urls(url_text.get("1.0", tk.END))
         scrape_btn_ref.config(state=tk.DISABLED)
-        scan_status_var.set("Scanning resources...")
-        scrape_status_var.set("—")
+        state_var.set("Running")
+        progress_var.set("—")
         scrape_counts: list[int] = [0, 0, 0]  # pdf, text, images
         run_parallel = urls_mode_var.get() == "parallel" and len(urls) > 1
 
         def update_status(line: str) -> None:
             if "Running:" in line or "Scrape:" in line or "Iteration" in line:
-                scan_status_var.set("Scanning resources...")
+                state_var.set("Running")
+                progress_var.set("Starting…")
             elif "Found:" in line:
-                scan_status_var.set("Mapping complete")
+                state_var.set("Running")
+                progress_var.set("Mapping done — downloading…")
             elif "→ Downloading" in line:
-                scan_status_var.set("Downloading assets...")
+                state_var.set("Running")
+                progress_var.set("Downloading…")
             elif "  [" in line and "/" in line and "] " in line:
-                # Parse [3/12] style progress (require "  " prefix to skip parallel URL prefix e.g. [1/3])
-                scan_status_var.set("Downloading assets...")
                 m = re.search(r"  \[(\d+)/(\d+)\]", line)
                 if m:
-                    scrape_status_var.set(f"{m.group(1)}/{m.group(2)} assets")
+                    state_var.set("Running")
+                    progress_var.set(f"{m.group(1)}/{m.group(2)} assets")
             elif "  Text:" in line:
                 scrape_counts[1] += 1
-                scan_status_var.set("Page loaded")
-                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                state_var.set("Running")
+                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
             elif "  Image:" in line:
                 scrape_counts[2] += 1
-                scan_status_var.set("Page loaded")
-                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                state_var.set("Running")
+                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
             elif "  PDF:" in line:
                 scrape_counts[0] += 1
-                scan_status_var.set("Page loaded")
-                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                state_var.set("Running")
+                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
             elif "Done." in line:
-                scan_status_var.set("Complete")
-                scrape_status_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                state_var.set("Finished")
+                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
 
         try:
             delay = float(delay_var.get())
@@ -357,6 +360,8 @@ def main() -> None:
             pass
         elif not selected_types:
             append_log("Error: Select at least one file type.\n")
+            state_var.set("Idle")
+            progress_var.set("—")
             scrape_btn_ref.config(state=tk.NORMAL)
             return
 
@@ -575,6 +580,8 @@ def main() -> None:
             except Exception:
                 pass
             output_queue.put(None)
+        state_var.set("Stopped")
+        progress_var.set("—")
 
     scrape_btn = ttk.Button(btn_frame, text="Scrape")
     stop_btn = ttk.Button(btn_frame, text="Stop", command=do_stop, state=tk.DISABLED)
