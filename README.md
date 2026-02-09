@@ -30,12 +30,7 @@ Or open the simple GUI:
 scrape-gui
 ```
 
-Optional: install Playwright for JS-heavy pages:
-
-```bash
-pip install -e ".[js]"
-playwright install
-```
+Use `--js` for JS-heavy pages (e.g. NYPL Digital Collections). Playwright and Chromium are installed automatically with the package; on first `--js` use, Chromium is downloaded if needed.
 
 Optional: install tqdm for a progress bar (per-page in crawl, per-asset on single page):
 
@@ -69,11 +64,37 @@ scrape --url https://example.com --crawl --workers 6 --delay 0.3
 scrape --url https://example.com --crawl --aggressiveness aggressive
 ```
 
+### Cloudflare and bot protection
+
+Some sites use **Cloudflare**, **DDoS-GUARD**, or similar protection and may return 403, challenge pages, or block non-browser traffic. The built-in `--js` mode (Playwright) can help on JS-heavy or bot-detecting sites, but it does not solve Cloudflare challenges.
+
+This scraper can fetch HTML via **[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr)** so Cloudflare-protected pages are solved by FlareSolverr’s headless browser and the cleared HTML is used for link and image discovery.
+
+1. Run FlareSolverr (e.g. Docker): `docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest`
+2. Enable it when scraping:
+   - **CLI:** `scrape --url https://... --flaresolverr` (uses `http://localhost:8191` or `FLARESOLVERR_URL`)
+   - **CLI with custom URL:** `scrape --url https://... --flaresolverr http://host:8191`
+   - **Env:** set `FLARESOLVERR_URL=http://localhost:8191` and pass `--flaresolverr`
+   - **GUI:** check “FlareSolverr (Cloudflare bypass)” and optionally set the FlareSolverr API URL.
+
+When `--flaresolverr` is set, page HTML is requested through FlareSolverr; asset downloads (images, PDFs) still use the normal fetcher. With crawl, the scraper uses one worker when FlareSolverr is enabled (same as with `--js`).
+
+- **FlareSolverr:** [https://github.com/FlareSolverr/FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — proxy server to bypass Cloudflare and DDoS-GUARD protection (MIT license).
+
+### Rate limits and automatic throttling
+
+When the scraper receives **HTTP 429 (Too Many Requests)** or a **200 response whose body indicates a rate limit** (e.g. “Rate limit reached”, “too many requests”), it:
+
+- Waits before retrying: uses the **Retry-After** header when present (seconds or HTTP-date), otherwise 30–60s.
+- **Throttles subsequent requests**: a per-Fetcher delay is applied so all following requests (HTML, images, HEADs) are slowed until the backend recovers. The delay decays gradually after successful responses.
+
+Sites like Archive-It that return a rate-limit message in the HTML body are handled the same way: wait, retry, and throttle.
+
 ### Iterations and auto timeout (single-page)
 
 On 403 or slow responses, the scraper retries automatically:
 
-- **Iterations:** Single-page runs retry up to `--max-iterations` (default 3). Each iteration uses a longer delay and timeout; if the first attempt gets 403, the next iteration automatically uses the browser (`--js`) when Playwright is installed.
+- **Iterations:** Single-page runs retry up to `--max-iterations` (default 3). Each iteration uses a longer delay and timeout; if the first attempt gets 403, the next iteration automatically uses the browser (`--js`) when Playwright is installed. For sites behind Cloudflare or similar protection, see [Cloudflare and bot protection](#cloudflare-and-bot-protection) above.
 - **Auto timeout:** Per-request timeout scales with each retry (30s → 60s → 120s, cap 120s). Suggested default is 120s max; override base with a custom timeout in code if needed.
 
 ```bash

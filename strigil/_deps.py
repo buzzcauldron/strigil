@@ -15,7 +15,6 @@ REQUIRED = [
 
 # (import_name, pip_package_name); order preserved for install
 OPTIONAL = [
-    ("playwright", "playwright"),
     ("readability", "readability-lxml"),
     ("tqdm", "tqdm"),
 ]
@@ -86,16 +85,6 @@ def _try_auto_install_optional() -> None:
     cmd = [sys.executable, "-m", "pip", "install", "-q"] + missing
     try:
         subprocess.run(cmd, check=True)
-        # If we installed playwright, install browser binaries
-        if "playwright" in missing:
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "playwright", "install"],
-                    capture_output=True,
-                    timeout=300,
-                )
-            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-                print("Playwright browsers: run 'playwright install' if you need JS rendering.", file=sys.stderr)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(f"Auto-install optional failed: {e}. Install manually: {OPTIONAL_EXTRAS}", file=sys.stderr)
 
@@ -110,4 +99,4 @@ def optional_hint() -> str | None:
     missing = [pip_name for mod_name, pip_name in OPTIONAL if not _import(mod_name)]
     if not missing:
         return None
-    return f"Optional: {OPTIONAL_EXTRAS} for JS rendering and readability."
+    return f"Optional: {OPTIONAL_EXTRAS} for improved text extraction."

@@ -2,6 +2,6 @@ httpx>=0.27.0
 beautifulsoup4>=4.12.0
 lxml>=5.0.0
 readability-lxml>=0.8.0
+playwright>=1.40.0
 
-# Optional: strigil[js] for JS-heavy sites
-# pip install strigil[js] && playwright install
+# Optional: playwright install (Chromium) for JS-heavy sites; auto-installed on first --js use

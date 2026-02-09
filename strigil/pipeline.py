@@ -441,7 +441,7 @@ def scrape_page(
     image_work: list[tuple[str, str, str, Path]] = []
     need_size_filter = min_image_size is not None or max_image_size is not None
     if "images" in want:
-        fetch_manifest = lambda u: fetcher.fetch_html(u, delay=delay)[0]
+        fetch_manifest = lambda u: fetcher.fetch_bytes(u, delay=delay)
         for img_url in collect_image_urls(soup, url, html_str, fetch_manifest=fetch_manifest, limit=None):
             if limit_images is not None and len(image_work) >= limit_images:
                 break
@@ -607,7 +607,10 @@ def run_single_or_sequential_crawl(
     max_image_size: int | None,
 ) -> None:
     """Single-page scrape or sequential crawl (workers=1)."""
-    with Fetcher(use_browser=args.js) as fetcher:
+    with Fetcher(
+        use_browser=args.js,
+        flaresolverr_url=getattr(args, "flaresolverr_url", None),
+    ) as fetcher:
         if args.crawl:
             start_domain = urlparse(args.url).netloc
             same_domain_only = args.same_domain_only
@@ -704,7 +707,11 @@ def run_single_or_sequential_crawl(
                             pbar.update(1)
                     progress_cb = _progress_cb
                 try:
-                    with Fetcher(timeout=timeout_i, use_browser=use_browser) as iter_fetcher:
+                    with Fetcher(
+                        timeout=timeout_i,
+                        use_browser=use_browser,
+                        flaresolverr_url=getattr(args, "flaresolverr_url", None),
+                    ) as iter_fetcher:
                         want = types_set or VALID_TYPES
                         if getattr(args, "map_first", True):
                             print("  → Fetching and mapping page...", file=sys.stderr)
@@ -721,7 +728,7 @@ def run_single_or_sequential_crawl(
                             fetcher_ctx = (
                                 (lambda f: lambda: nullcontext(f))(iter_fetcher)
                                 if use_browser
-                                else (lambda: Fetcher(timeout=60, use_browser=False))
+                                else (lambda: Fetcher(timeout=60, use_browser=False, flaresolverr_url=getattr(args, "flaresolverr_url", None)))
                             )
                             n_pdf, n_img = len(map_result.pdf_urls), len(map_result.image_items)
                             if n_pdf or n_img or map_result.text:
@@ -785,6 +792,7 @@ def crawl_parallel(
     max_image_size: int | None,
     *,
     use_browser: bool = False,
+    flaresolverr_url: str | None = None,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -826,7 +834,7 @@ def crawl_parallel(
 
         def worker() -> None:
             nonlocal pending
-            fetcher = Fetcher(use_browser=use_browser)
+            fetcher = Fetcher(use_browser=use_browser, flaresolverr_url=flaresolverr_url)
             try:
                 while True:
                     item = work_queue.get()

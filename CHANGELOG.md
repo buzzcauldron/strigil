@@ -6,12 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2025-02-06
+
+### Added
+- **Schema detection pipeline** (`strigil/schema.py`): Detects image storage schema (CONTENTdm, NYPL, IIIF manifest, generic HTML) and runs the appropriate extractor for full-resolution images.
+- **NYPL Digital Collections**: Full support for 112+ canvases per item via `api-collections.nypl.org` manifest; IIIF 3 parsing with `rendering` and top-level Canvas items.
+- **FlareSolverr integration** (`strigil/flaresolverr.py`): Optional `--flaresolverr` / `FLARESOLVERR_URL` to fetch HTML via [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) and bypass Cloudflare; GUI checkbox and URL field.
+- **Rate-limit handling**: Automatic throttling on HTTP 429 or rate-limit text in response body; honors `Retry-After` (seconds or HTTP-date); per-Fetcher backoff with decay after success.
+- Playwright and Chromium as default dependencies; Chromium installs automatically on first `--js` use.
+
 ### Changed
 - Renamed package from basic-scraper to strigil. Install with `pip install strigil`.
-- Config dir: `~/.basic-scraper/` → `~/.strigil/`.
-- Env var: `BASIC_SCRAPER_AUTO_INSTALL_DEPS` → `STRIGIL_AUTO_INSTALL_DEPS`.
-- Auto-install dependencies on first run by default. Required deps are installed and the app exits; optional deps (playwright, tqdm, readability-lxml) are installed and the app continues. Set `STRIGIL_AUTO_INSTALL_DEPS=0` to disable.
-- Repository branding: project URLs, USER_AGENT, and README updated to strigil.
+- Config dir: `~/.basic-scraper/` → `~/.strigil/`. Env var: `BASIC_SCRAPER_AUTO_INSTALL_DEPS` → `STRIGIL_AUTO_INSTALL_DEPS`.
+- Auto-install dependencies on first run by default; optional deps (playwright, tqdm, readability-lxml) install and app continues. Set `STRIGIL_AUTO_INSTALL_DEPS=0` to disable.
+- Discovery delegates to schema pipeline; CONTENTdm, NYPL, IIIF manifest, and generic HTML run in priority order.
+- JS support: no longer requires extra install or manual `playwright install`.
+- Crawl with `--js` or `--flaresolverr` uses one worker for reliable rendering.
+- GUI: "Use JavaScript" checkbox (default on); "FlareSolverr (Cloudflare bypass)" option.
+- README: Cloudflare/FlareSolverr section, rate limits and throttling, install notes; repository branding to strigil.
 
 ## [0.3.0] - 2025-02-04
 

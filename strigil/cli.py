@@ -108,6 +108,14 @@ def main() -> None:
         help="Fetch HTML with a real browser (Playwright). Use for JS-heavy or bot-protected sites.",
     )
     parser.add_argument(
+        "--flaresolverr",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="URL",
+        help="Fetch HTML via FlareSolverr to bypass Cloudflare (default: FLARESOLVERR_URL or http://localhost:8191).",
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
         default=3,
@@ -170,6 +178,12 @@ def main() -> None:
 
     if getattr(args, "sequential", False):
         args.workers = 1
+    # FlareSolverr: --flaresolverr [URL] or FLARESOLVERR_URL env
+    from strigil.flaresolverr import DEFAULT_FLARESOLVERR_URL, get_flaresolverr_url
+    if args.flaresolverr is not None:
+        args.flaresolverr_url = (args.flaresolverr.strip() or get_flaresolverr_url() or DEFAULT_FLARESOLVERR_URL)
+    else:
+        args.flaresolverr_url = get_flaresolverr_url()
 
     if not args.url or not [u for u in args.url if u and str(u).strip()]:
         parser.error("At least one URL is required (or use --hardware to print hardware info).")
@@ -204,15 +218,21 @@ def main() -> None:
             if len(urls) > 1:
                 print(f"\n——— Site {i + 1}/{len(urls)}: {url} ———", file=sys.stderr)
             args.url = url
-            if args.crawl and workers > 1:
+            # Use sequential crawl when --js or --flaresolverr (browser/proxy doesn't parallelize well)
+            use_parallel = args.crawl and workers > 1 and not args.js and not getattr(args, "flaresolverr_url", None)
+            if args.crawl and (args.js or getattr(args, "flaresolverr_url", None)) and workers > 1:
+                print("  (Using 1 worker with --js/--flaresolverr for reliable page rendering)", file=sys.stderr)
+            if use_parallel:
                 crawl_parallel(
                     url, out_dir, args.delay, args.max_depth,
                     args.same_domain_only, limit, types_set, workers, use_progress,
-                    min_image_size, max_image_size, use_browser=args.js,
+                    min_image_size, max_image_size, use_browser=False,
+                    flaresolverr_url=getattr(args, "flaresolverr_url", None),
                 )
             else:
+                eff_workers = 1 if (args.crawl and args.js) else workers
                 run_single_or_sequential_crawl(
-                    args, out_dir, limit, types_set, workers, use_progress,
+                    args, out_dir, limit, types_set, eff_workers, use_progress,
                     min_image_size, max_image_size,
                 )
         if getattr(args, "done_script", None):

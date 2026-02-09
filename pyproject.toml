@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strigil"
-version = "0.2.0"
+version = "0.4.0"
 description = "Strigil: PDFs, text, and images from websites at high quality, stored locally."
 readme = "README.md"
 license = { text = "MIT" }
@@ -15,11 +15,11 @@ dependencies = [
     "lxml",
     "readability-lxml",
     "tqdm",
+    "playwright",
 ]
 
 [project.optional-dependencies]
 readability = ["readability-lxml"]
-js = ["playwright"]
 bundle = ["pyinstaller>=6.0"]
 progress = ["tqdm"]
 

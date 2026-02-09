@@ -147,6 +147,7 @@ def main() -> None:
         size_medium_var.set(True)
         size_large_var.set(True)
         delay_var.set(0.5)
+        js_var.set(True)
         crawl_var.set(True)
         depth_var.set(2)
         same_domain_var.set(True)
@@ -209,6 +210,22 @@ def main() -> None:
     agg_var.trace_add("write", on_aggressiveness_change)
     agg_combo.set(f"auto ({suggested})")
 
+    js_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(
+        opts_frame,
+        text="Use JavaScript (needed for NYPL, etc.)",
+        variable=js_var,
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    flaresolverr_var = tk.BooleanVar(value=False)
+    flaresolverr_url_var = tk.StringVar(value="")
+    ttk.Checkbutton(
+        opts_frame,
+        text="FlareSolverr (Cloudflare bypass)",
+        variable=flaresolverr_var,
+    ).pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Label(opts_frame, text="URL:").pack(side=tk.LEFT, padx=(0, 2))
+    flaresolverr_entry = ttk.Entry(opts_frame, textvariable=flaresolverr_url_var, width=22)
+    flaresolverr_entry.pack(side=tk.LEFT, padx=(0, 8))
     crawl_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(
         opts_frame,
@@ -349,6 +366,48 @@ def main() -> None:
             if n >= 1024:
                 return f"{n // 1024}k"
             return str(n)
+
+        lows: list[int] = []
+        highs: list[int | None] = []
+        if size_small_var.get():
+            lows.append(0)
+            highs.append(SIZE_SMALL_MAX)
+        if size_medium_var.get():
+            lows.append(SIZE_MEDIUM_MIN)
+            highs.append(SIZE_MEDIUM_MAX)
+        if size_large_var.get():
+            lows.append(SIZE_LARGE_MIN)
+            highs.append(None)  # no max
+        if lows:
+            low = min(lows)
+            high = None if None in highs else max(h for h in highs if h is not None)
+            if low > 0:
+                base_cmd.extend(["--min-image-size", _size_to_arg(low)])
+            if high is not None:
+                base_cmd.extend(["--max-image-size", _size_to_arg(high)])
+        if js_var.get():
+            base_cmd.append("--js")
+        if flaresolverr_var.get():
+            url_opt = flaresolverr_url_var.get().strip()
+            if url_opt:
+                base_cmd.extend(["--flaresolverr", url_opt])
+            else:
+                base_cmd.append("--flaresolverr")
+        if crawl_var.get():
+            base_cmd.extend(["--crawl", "--max-depth", str(depth)])
+            try:
+                w = int(workers_var.get())
+                w = max(1, min(12, w))
+                base_cmd.extend(["--workers", str(w)])
+            except (ValueError, tk.TclError):
+                pass
+            if same_domain_var.get():
+                base_cmd.append("--same-domain-only")
+        done_script = done_script_var.get().strip()
+        if done_script:
+            base_cmd.extend(["--done-script", done_script])
+        if keep_awake_var.get():
+            base_cmd.append("--keep-awake")
 
         def build_cmd(url_list: list[str]) -> list[str]:
             c = base_cmd + ["--url"] + url_list + [

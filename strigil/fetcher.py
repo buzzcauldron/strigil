@@ -1,10 +1,46 @@
 """HTTP fetching with retries, streaming, and politeness (User-Agent, timeouts)."""
 
 import random
+import sys
 import time
 from pathlib import Path
 
 import httpx
+
+# Phrases that indicate a rate-limit page (200 body) so we throttle and retry
+RATE_LIMIT_PHRASES = (b"rate limit", b"too many requests", b"throttl", b"slow down", b"try again")
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse Retry-After header; return seconds to wait, or None."""
+    if not value or not value.strip():
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(value)
+        diff = dt.timestamp() - time.time()
+        return max(1.0, diff) if diff > 0 else None
+    except Exception:
+        return None
+
+
+def _body_indicates_rate_limit(content: bytes) -> bool:
+    """True if response body looks like a rate-limit or throttle message."""
+    if not content or len(content) > 50_000:
+        return False
+    lower = content.lower()
+    return any(phrase in lower for phrase in RATE_LIMIT_PHRASES)
+
+
+def _iiif_alternate_url(url: str) -> str | None:
+    """Return an alternate IIIF Image API URL to try on 501, or None."""
+    if "/full/full/" in url:
+        return url.replace("/full/full/", "/full/max/", 1)
+    if "/full/max/" in url:
+        return url.replace("/full/max/", "/full/full/", 1)
+    return None
 
 
 def _polite_sleep(delay: float) -> None:
@@ -43,10 +79,12 @@ class Fetcher:
         timeout: float = DEFAULT_TIMEOUT,
         headers: dict[str, str] | None = None,
         use_browser: bool = False,
+        flaresolverr_url: str | None = None,
     ) -> None:
         self._timeout = timeout
         self._headers = {**DEFAULT_HEADERS, **(headers or {})}
         self._use_browser = use_browser
+        self._flaresolverr_url = flaresolverr_url
         self._client: httpx.Client | None = None
         # Playwright: one context per Fetcher so cookies from first page load apply to assets
         self._playwright = None
@@ -54,6 +92,13 @@ class Fetcher:
         self._browser_context = None
         # Page URL from last fetch_html; sent as Referer on asset requests to reduce 403s
         self._page_url: str | None = None
+        # After 429 or rate-limit body, throttle subsequent requests by this many seconds
+        self._rate_limit_delay: float = 0.0
+
+    def _sleep(self, delay: float) -> None:
+        """Sleep at least delay; add extra if we're in rate-limit backoff."""
+        effective = max(delay, self._rate_limit_delay)
+        _polite_sleep(effective)
 
     def spawn(self) -> "Fetcher":
         """Return a new Fetcher with the same config (for use in another thread)."""
@@ -80,10 +125,25 @@ class Fetcher:
             from playwright.sync_api import sync_playwright
         except ImportError as e:
             raise RuntimeError(
-                "Browser fetch (--js) requires: pip install strigil[js] && playwright install"
+                "Browser fetch (--js) requires: pip install strigil && playwright install"
             ) from e
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=True)
+        try:
+            self._browser = self._playwright.chromium.launch(headless=True)
+        except Exception as e:
+            exc_str = str(e).lower()
+            if "executable doesn't exist" in exc_str or "executable does not exist" in exc_str:
+                import subprocess
+                import sys
+                print("Installing Playwright Chromium (one-time)...", file=sys.stderr)
+                subprocess.run(
+                    [sys.executable, "-m", "playwright", "install", "chromium"],
+                    check=True,
+                    timeout=300,
+                )
+                self._browser = self._playwright.chromium.launch(headless=True)
+            else:
+                raise
         self._browser_context = self._browser.new_context()
         return self._browser_context
 
@@ -116,9 +176,15 @@ class Fetcher:
         self.close()
 
     def fetch_html(self, url: str, *, delay: float = 0) -> tuple[bytes, str]:
-        """Fetch HTML; returns (raw_bytes, charset). Uses browser (Playwright) when use_browser=True."""
+        """Fetch HTML; returns (raw_bytes, charset). Uses FlareSolverr, browser (Playwright), or httpx."""
+        if self._flaresolverr_url:
+            self._sleep(delay)
+            from strigil.flaresolverr import fetch_html as flaresolverr_fetch
+            self._page_url = url
+            timeout_ms = min(int(self._timeout * 1000), int(MAX_TIMEOUT * 1000))
+            return flaresolverr_fetch(url, self._flaresolverr_url, timeout_ms=timeout_ms)
         if self._use_browser:
-            _polite_sleep(delay)
+            self._sleep(delay)
             ctx = self._get_browser_context()
             self._page_url = url
             last_exc: BaseException | None = None
@@ -130,11 +196,14 @@ class Fetcher:
                 page = ctx.new_page()
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=int(attempt_timeout_ms))
-                    # Brief wait for lazy-loaded images and JS-injected content
+                    # Wait for lazy-loaded content; longer for known JS-heavy IIIF sites (NYPL, etc.)
+                    networkidle_timeout = 4000
+                    if "digitalcollections.nypl.org" in url or "universalviewer.io" in url:
+                        networkidle_timeout = 15000
                     try:
-                        page.wait_for_load_state("networkidle", timeout=4000)
+                        page.wait_for_load_state("networkidle", timeout=networkidle_timeout)
                     except Exception:
-                        time.sleep(1.5)
+                        time.sleep(2 if networkidle_timeout > 5000 else 1.5)
                     html = page.content()
                     return html.encode("utf-8"), "utf-8"
                 except Exception as e:
@@ -145,7 +214,7 @@ class Fetcher:
                     raise
                 finally:
                     page.close()
-        _polite_sleep(delay)
+        self._sleep(delay)
         last_exc = None
         for attempt in range(MAX_RETRIES):
             attempt_timeout = min(
@@ -156,6 +225,16 @@ class Fetcher:
                 client = self._get_client()
                 resp = client.get(url, timeout=attempt_timeout)
                 resp.raise_for_status()
+                # Some sites return 200 with a rate-limit message in the body
+                if _body_indicates_rate_limit(resp.content):
+                    wait = _parse_retry_after((resp.headers or {}).get("retry-after")) or 60.0
+                    self._rate_limit_delay = max(self._rate_limit_delay, wait)
+                    if attempt < MAX_RETRIES - 1:
+                        print(f"  Rate limit detected; waiting {wait:.0f}s then retrying...", file=sys.stderr)
+                        _polite_sleep(wait)
+                        continue
+                # Decay throttle after success
+                self._rate_limit_delay = max(0.0, self._rate_limit_delay * 0.9)
                 return resp.content, resp.charset_encoding or "utf-8"
             except (httpx.HTTPStatusError, httpx.RequestError) as e:
                 last_exc = e
@@ -164,19 +243,57 @@ class Fetcher:
                     code = getattr(r, "status_code", None)
                     retryable = code in (403, 429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1
                     if retryable:
-                        wait = RETRY_BACKOFF ** attempt
-                        if r is not None and code in (403, 429):
-                            ra = (r.headers or {}).get("retry-after", "").strip()
-                            if ra and ra.isdigit():
-                                wait = max(wait, float(ra))
+                        wait = _parse_retry_after((r.headers or {}).get("retry-after")) or (RETRY_BACKOFF ** attempt)
+                        if code == 429:
+                            wait = max(wait, 30.0)
+                        self._rate_limit_delay = max(self._rate_limit_delay, wait)
+                        if code == 429:
+                            print(f"  Rate limit (429); waiting {wait:.0f}s then retrying...", file=sys.stderr)
                         _polite_sleep(wait)
                         continue
                 raise
         raise last_exc  # type: ignore[misc]
 
+    def fetch_bytes(self, url: str, *, delay: float = 0) -> bytes:
+        """
+        Fetch raw bytes (e.g. for IIIF manifests).
+        For .json URLs in browser mode, uses in-page fetch() to bypass
+        Incapsula/bot protection (e.g. NYPL Digital Collections).
+        """
+        self._sleep(delay)
+        if self._use_browser and ("manifest.json" in url or url.rstrip("/").endswith(".json")):
+            ctx = self._get_browser_context()
+            timeout_ms = min(int(self._timeout * 1000), int(MAX_TIMEOUT * 1000))
+            # In-page fetch has same-origin cookies; request API may be blocked by Incapsula
+            page = ctx.new_page()
+            try:
+                page.goto(self._page_url or url, wait_until="domcontentloaded", timeout=timeout_ms)
+                result = page.evaluate(
+                    """async ([u, tout]) => {
+                        const r = await fetch(u, {credentials: 'same-origin'});
+                        if (!r.ok) throw new Error('fetch failed: ' + r.status);
+                        return Array.from(new Uint8Array(await r.arrayBuffer()));
+                    }""",
+                    [url, timeout_ms],
+                )
+                page.close()
+                if result:
+                    return bytes(result)
+            except Exception:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                raise
+        # Non-browser or non-JSON: use simple GET
+        client = self._get_client()
+        resp = client.get(url, timeout=min(self._timeout, MAX_TIMEOUT))
+        resp.raise_for_status()
+        return resp.content
+
     def fetch_binary(self, url: str, dest_path: Path, *, timeout: float = 60.0, delay: float = 0) -> bool:
         """Stream download to dest_path. Returns True on success."""
-        _polite_sleep(delay)
+        self._sleep(delay)
         if self._use_browser:
             ctx = self._get_browser_context()
             headers = {"Referer": self._page_url} if self._page_url else {}
@@ -197,6 +314,15 @@ class Fetcher:
                         wait = max(wait, float(ra))
                     _polite_sleep(wait)
                     continue
+                # IIIF 501 Not Implemented: try alternate size (full/full <-> full/max)
+                if resp.status == 501:
+                    alt = _iiif_alternate_url(url)
+                    if alt:
+                        resp2 = ctx.request.get(alt, timeout=attempt_timeout_ms, headers=headers or None)
+                        if resp2.ok:
+                            dest_path.parent.mkdir(parents=True, exist_ok=True)
+                            dest_path.write_bytes(resp2.body())
+                            return True
                 raise RuntimeError(
                     f"Client error '{resp.status} {resp.status_text}' for url '{url}'"
                 )
@@ -217,13 +343,28 @@ class Fetcher:
                 r = getattr(e, "response", None)
                 if r is not None:
                     code = getattr(r, "status_code", None)
+                    # IIIF 501 Not Implemented: try alternate size (full/full <-> full/max)
+                    if code == 501:
+                        alt = _iiif_alternate_url(url)
+                        if alt:
+                            try:
+                                with client.stream("GET", alt, timeout=attempt_timeout) as resp2:
+                                    resp2.raise_for_status()
+                                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                                    with open(dest_path, "wb") as f:
+                                        for chunk in resp2.iter_bytes(chunk_size=65536):
+                                            f.write(chunk)
+                                    return True
+                            except (httpx.HTTPStatusError, httpx.RequestError):
+                                pass
                     retryable = code in (403, 429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1
                     if retryable:
-                        wait = RETRY_BACKOFF ** attempt
-                        if r is not None and code in (403, 429):
-                            ra = (r.headers or {}).get("retry-after", "").strip()
-                            if ra and ra.isdigit():
-                                wait = max(wait, float(ra))
+                        wait = _parse_retry_after((r.headers or {}).get("retry-after")) or (RETRY_BACKOFF ** attempt)
+                        if code == 429:
+                            wait = max(wait, 30.0)
+                        self._rate_limit_delay = max(self._rate_limit_delay, wait)
+                        if code == 429:
+                            print(f"  Rate limit (429); waiting {wait:.0f}s then retrying...", file=sys.stderr)
                         _polite_sleep(wait)
                         continue
                 raise
@@ -231,7 +372,7 @@ class Fetcher:
 
     def head_metadata(self, url: str, *, timeout: float = 10.0, delay: float = 0) -> tuple[str | None, int | None]:
         """HEAD request; returns (content_type, content_length). content_length is None if header missing."""
-        _polite_sleep(delay)
+        self._sleep(delay)
         head_timeout = min(timeout, MAX_TIMEOUT)
         if self._use_browser:
             try:
@@ -239,6 +380,16 @@ class Fetcher:
                 headers = {"Referer": self._page_url} if self._page_url else {}
                 resp = ctx.request.head(url, timeout=head_timeout * 1000, headers=headers or None)
                 if not resp.ok:
+                    if resp.status == 501:
+                        alt = _iiif_alternate_url(url)
+                        if alt:
+                            resp2 = ctx.request.head(alt, timeout=head_timeout * 1000, headers=headers or None)
+                            if resp2.ok:
+                                ct = (resp2.headers or {}).get("content-type", "")
+                                content_type = ct.split(";")[0].strip().lower() if ct else None
+                                cl = (resp2.headers or {}).get("content-length")
+                                content_length = int(cl) if cl is not None and str(cl).isdigit() else None
+                                return content_type, content_length
                     return None, None
                 ct = resp.headers.get("content-type", "")
                 content_type = ct.split(";")[0].strip().lower() if ct else None
@@ -256,6 +407,21 @@ class Fetcher:
             cl = resp.headers.get("content-length")
             content_length = int(cl) if cl is not None and cl.isdigit() else None
             return content_type, content_length
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 501:
+                alt = _iiif_alternate_url(url)
+                if alt:
+                    try:
+                        resp2 = client.head(alt, timeout=head_timeout)
+                        resp2.raise_for_status()
+                        ct = resp2.headers.get("content-type", "")
+                        content_type = ct.split(";")[0].strip().lower() if ct else None
+                        cl = resp2.headers.get("content-length")
+                        content_length = int(cl) if cl is not None and cl.isdigit() else None
+                        return content_type, content_length
+                    except Exception:
+                        pass
+            return None, None
         except Exception:
             return None, None
 

@@ -1,21 +1,15 @@
 """
-Image URL discovery: one place that combines all sources (CONTENTdm, IIIF, in-page).
-Depends only on extractors and an optional fetch callback—no Fetcher type.
+Image URL discovery: schema detection pipeline + extraction.
+
+Uses strigil.schema to detect image storage schema (CONTENTdm, NYPL, IIIF,
+generic HTML) and run the appropriate extraction strategy for full-resolution images.
 """
 
-import json
 from typing import Callable
 
 from bs4 import BeautifulSoup
 
-from strigil.extractors import (
-    find_contentdm_full_res_urls,
-    find_derived_iiif_manifest_urls,
-    find_image_urls,
-    find_iiif_manifest_urls,
-    parse_iiif_manifest,
-    should_skip_image_url,
-)
+from strigil.schema import collect_image_urls as _collect_image_urls
 
 
 def collect_image_urls(
@@ -27,39 +21,13 @@ def collect_image_urls(
     limit: int | None = None,
 ) -> list[str]:
     """
-    Collect image URLs from CONTENTdm, IIIF manifests, and page HTML.
-    Deduped and skip-filtered. Optional fetch_manifest(manifest_url) for IIIF.
+    Detect image storage schema and collect image URLs using the proper strategy.
+    Delegates to the schema detection pipeline.
     """
-    img_urls: list[str] = []
-    seen: set[str] = set()
-
-    def add(u: str) -> None:
-        if u and not should_skip_image_url(u) and u not in seen:
-            seen.add(u)
-            img_urls.append(u)
-
-    for u in find_contentdm_full_res_urls(url, html_str):
-        add(u)
-
-    if fetch_manifest is not None:
-        manifest_urls = list(find_iiif_manifest_urls(soup, url, html_str))
-        manifest_urls.extend(find_derived_iiif_manifest_urls(url))
-        seen_manifests: set[str] = set()
-        for manifest_url in manifest_urls:
-            if manifest_url in seen_manifests:
-                continue
-            seen_manifests.add(manifest_url)
-            try:
-                raw = fetch_manifest(manifest_url)
-                data = json.loads(raw.decode("utf-8"))
-                for u in parse_iiif_manifest(data):
-                    add(u)
-            except Exception:
-                pass
-
-    for u in find_image_urls(soup, url):
-        add(u)
-
-    if limit is not None:
-        img_urls = img_urls[:limit]
-    return img_urls
+    return _collect_image_urls(
+        soup,
+        url,
+        html_str,
+        fetch_manifest=fetch_manifest,
+        limit=limit,
+    )

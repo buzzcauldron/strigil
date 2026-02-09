@@ -41,6 +41,16 @@ _IIIF_IMAGE_API_RE = re.compile(
     r"(https?://[^/]+/digital/iiif/2/[^/]+)/full/[^/]+/\d+/[^/]+\.(jpg|png|webp)",
     re.IGNORECASE,
 )
+# NYPL Digital Collections: /items/{uuid} (JS-heavy, manifest at api-collections)
+_NYPL_ITEMS_RE = re.compile(
+    r"^https?://(?:www\.)?digitalcollections\.nypl\.org/items/[a-f0-9-]{36}",
+    re.IGNORECASE,
+)
+# NYPL IIIF 3 image URLs: iiif.nypl.org/iiif/3/{id}/full/{size}/0/default.jpg -> full size
+_NYPL_IIIF3_RE = re.compile(
+    r"(https?://iiif\.nypl\.org/iiif/3/[a-f0-9]+)/full/[^/]+/\d+/[^/]+\.(jpg|png|webp)",
+    re.IGNORECASE,
+)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}
 
@@ -265,6 +275,36 @@ def find_contentdm_full_res_urls(page_url: str, raw_html: str = "") -> list[str]
     return out
 
 
+def find_nypl_manifest_urls(page_url: str) -> list[str]:
+    """
+    For NYPL Digital Collections (digitalcollections.nypl.org/items/{uuid}):
+    manifest is at api-collections.nypl.org, not on the item domain.
+    """
+    if not _NYPL_ITEMS_RE.match(page_url):
+        return []
+    m = re.search(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", page_url, re.I)
+    if not m:
+        return []
+    uuid = m.group(0)
+    return [f"https://api-collections.nypl.org/manifests/{uuid}"]
+
+
+def find_nypl_iiif_image_urls(raw_html: str) -> list[str]:
+    """
+    Extract NYPL IIIF 3 image URLs from HTML and rewrite to full size.
+    IIIF 3 uses 'max' for size (not 'full'); format: .../full/max/0/default.jpg
+    """
+    urls = []
+    seen = set()
+    for m in _NYPL_IIIF3_RE.finditer(raw_html):
+        prefix, ext = m.group(1), m.group(2)
+        full_url = f"{prefix}/full/max/0/default.{ext}"
+        if full_url not in seen:
+            seen.add(full_url)
+            urls.append(full_url)
+    return urls
+
+
 def find_iiif_manifest_urls(soup: BeautifulSoup, base_url: str, raw_html: str = "") -> list[str]:
     """
     Find IIIF manifest URLs from iframes (Universal Viewer, Mirador, etc.), links, and page text.
@@ -375,7 +415,7 @@ def find_derived_iiif_manifest_urls(page_url: str) -> list[str]:
 def parse_iiif_manifest(manifest_data: dict) -> list[str]:
     """
     Parse IIIF 2.0 or 3.0 manifest JSON; return list of full-size image URLs.
-    Supports sequences/canvases (2.0) and items (3.0).
+    Supports sequences/canvases (2.0), items (3.0), and NYPL-style rendering.
     """
     image_urls: list[str] = []
     seen: set[str] = set()
@@ -385,37 +425,94 @@ def parse_iiif_manifest(manifest_data: dict) -> list[str]:
             seen.add(u)
             image_urls.append(u)
 
+    def to_full_res_iiif(url: str) -> str:
+        """Rewrite IIIF URL to full resolution (full/max/0/default.jpg)."""
+        if "/full/max/" in url or "/full/full/" in url:
+            return url
+        # Replace size segment (e.g. full/!760,760 or full/300,) with full/max
+        if "/full/" in url and ("iiif" in url.lower() or "iiif" in url):
+            base = url.split("/full/")[0]
+            tail = "/0/default.jpg"
+            if "/0/default." in url:
+                tail = url[url.find("/0/default.") :]
+            return f"{base}/full/max{tail}"
+        return url
+
     def image_from_resource(res: dict, service_id: str | None = None) -> str | None:
         svc = res.get("service")
         sid = None
         if isinstance(svc, dict):
             sid = svc.get("@id") or svc.get("id")
+        elif isinstance(svc, list) and svc:
+            first = svc[0]
+            sid = (first.get("@id") or first.get("id")) if isinstance(first, dict) else None
         sid = sid or service_id
-        # Prefer IIIF Image API URL (full/full/0/default.jpg) - more reliable than direct resource URL
+        # Prefer IIIF Image API full size - IIIF 3 uses /full/max/
         if sid:
-            return f"{str(sid).rstrip('/')}/full/full/0/default.jpg"
+            return f"{str(sid).rstrip('/')}/full/max/0/default.jpg"
         rid = res.get("@id") or res.get("id")
         if isinstance(rid, str) and ("iiif" in rid.lower() or rid.endswith((".jpg", ".png", ".jpeg", ".webp"))):
-            return rid
+            return to_full_res_iiif(rid)
         return None
 
+    def best_url_from_rendering(rendering: list) -> str | None:
+        """Pick full-resolution URL from rendering options (e.g. NYPL)."""
+        if not isinstance(rendering, list):
+            return None
+        full_max = None
+        for r in rendering:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("id") or r.get("@id")
+            if not isinstance(rid, str):
+                continue
+            if "/full/max/" in rid:
+                return rid
+            if "/full/full/" in rid:
+                full_max = rid
+        return full_max
+
     def walk_canvas(canvas: dict) -> None:
-        images = canvas.get("images") or canvas.get("items") or []
+        # NYPL: canvas.rendering lists options; prefer "Original" (full/max)
+        for u in (best_url_from_rendering(canvas.get("rendering")),):
+            if u:
+                add_url(u)
+                return
+        # IIIF 3: annotation pages under canvas.items
+        pages = canvas.get("items") or []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            for ann in page.get("items") or []:
+                if not isinstance(ann, dict):
+                    continue
+                body = ann.get("body")
+                if isinstance(body, dict):
+                    url = image_from_resource(body)
+                    if url:
+                        add_url(url)
+                        return
+        # IIIF 2: images under canvas.images
+        images = canvas.get("images") or []
         for img in images:
             res = img.get("resource") if isinstance(img, dict) else None
             if not res:
                 continue
-            svc = (res.get("service") or {})
-            svc_id = (svc.get("@id") or svc.get("id")) if isinstance(svc, dict) else None
-            url = image_from_resource(res, svc_id)
+            url = image_from_resource(res)
             if url:
                 add_url(url)
 
-    sequences = manifest_data.get("sequences") or manifest_data.get("items") or []
-    for seq in sequences:
-        canvases = seq.get("canvases") or seq.get("items") or []
-        for canvas in canvases:
-            walk_canvas(canvas)
+    items_or_seqs = manifest_data.get("sequences") or manifest_data.get("items") or []
+    for thing in items_or_seqs:
+        if not isinstance(thing, dict):
+            continue
+        if thing.get("type") == "Canvas":
+            walk_canvas(thing)
+        else:
+            canvases = thing.get("canvases") or thing.get("items") or []
+            for canvas in canvases:
+                if isinstance(canvas, dict):
+                    walk_canvas(canvas)
 
     return image_urls
 
