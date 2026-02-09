@@ -68,7 +68,7 @@ def check_required() -> bool:
     print(f"    {INSTALL_CMD_SOURCE}", file=sys.stderr)
     print("", file=sys.stderr)
     print("  Or enable auto-install (default) and re-run:", file=sys.stderr)
-    print(f"    scrape --url ...  # {AUTO_INSTALL_ENV}=0 to disable", file=sys.stderr)
+    print(f"    strigil --url ...  # {AUTO_INSTALL_ENV}=0 to disable", file=sys.stderr)
     print("", file=sys.stderr)
     print("  Missing:", ", ".join(missing), file=sys.stderr)
     sys.exit(1)

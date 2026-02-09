@@ -1,4 +1,4 @@
-"""Strigil CLI. Invoked as `scrape` when installed with pip install -e ."""
+"""Strigil CLI. Invoked as `strigil` when installed with pip install -e ."""
 
 import os
 
@@ -46,7 +46,7 @@ def main() -> None:
         print(hint, file=sys.stderr)
 
     parser = argparse.ArgumentParser(
-        prog="scrape",
+        prog="strigil",
         description="Scrape PDFs, text, and images from a URL and store locally.",
     )
     parser.add_argument("--url", nargs="*", default=None, metavar="URL", help="URL(s) to scrape (one or more)")

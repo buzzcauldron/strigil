@@ -1,4 +1,4 @@
-"""Minimal GUI for Strigil. Run with: scrape-gui"""
+"""Minimal GUI for Strigil. Run with: strigil-gui"""
 
 import os
 import queue
@@ -342,8 +342,8 @@ def main() -> None:
             depth = 2
         if getattr(sys, "frozen", False):
             base = os.path.dirname(sys.executable)
-            scrape_bin = os.path.join(base, "scrape.exe" if sys.platform == "win32" else "scrape")
-            base_cmd = [scrape_bin]
+            strigil_bin = os.path.join(base, "strigil.exe" if sys.platform == "win32" else "strigil")
+            base_cmd = [strigil_bin]
         else:
             base_cmd = [sys.executable, "-m", "strigil.cli"]
         selected_types = []

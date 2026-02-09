@@ -30,7 +30,7 @@ exe_cli = EXE(
     a_cli.scripts,
     [],
     exclude_binaries=True,
-    name="scrape",
+    name="strigil",
 )
 
 # --- GUI ---
@@ -46,7 +46,7 @@ exe_gui = EXE(
     a_gui.scripts,
     [],
     exclude_binaries=True,
-    name="scrape-gui",
+    name="strigil-gui",
 )
 
 # One folder with both executables so the GUI can run the CLI
