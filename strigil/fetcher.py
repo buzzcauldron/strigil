@@ -43,6 +43,21 @@ def _iiif_alternate_url(url: str) -> str | None:
     return None
 
 
+def _is_retryable_5xx(code: int | None) -> bool:
+    """True if status is a transient server error we should retry."""
+    return code in (500, 502, 503, 504)
+
+
+def _wait_for_retry(code: int | None, attempt: int, retry_after_header: str | None) -> float:
+    """Return seconds to wait before retry. Longer for 5xx."""
+    from_header = _parse_retry_after(retry_after_header)
+    if from_header is not None:
+        return from_header
+    if _is_retryable_5xx(code):
+        return BASE_WAIT_5XX * (RETRY_BACKOFF ** attempt)
+    return RETRY_BACKOFF ** attempt
+
+
 def _polite_sleep(delay: float) -> None:
     """Sleep with ±15% jitter plus small random offset to avoid fixed-interval bot patterns."""
     jittered = delay * random.uniform(0.85, 1.15) if delay > 0 else 0.0
@@ -61,7 +76,9 @@ DEFAULT_USER_AGENT = (
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 120.0  # auto timeout cap: per-attempt timeout scales up to this
 MAX_RETRIES = 3
+MAX_RETRIES_5XX = 6  # more retries for 502/503/504 (server often recovers after a short wait)
 RETRY_BACKOFF = 2.0  # multiplicative factor for delay and timeout scaling
+BASE_WAIT_5XX = 5.0  # base wait in seconds before retrying on 502/503/504
 
 DEFAULT_HEADERS = {
     "User-Agent": DEFAULT_USER_AGENT,
@@ -216,7 +233,7 @@ class Fetcher:
                     page.close()
         self._sleep(delay)
         last_exc = None
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(MAX_RETRIES_5XX):
             attempt_timeout = min(
                 self._timeout * (RETRY_BACKOFF ** attempt),
                 MAX_TIMEOUT,
@@ -229,7 +246,7 @@ class Fetcher:
                 if _body_indicates_rate_limit(resp.content):
                     wait = _parse_retry_after((resp.headers or {}).get("retry-after")) or 60.0
                     self._rate_limit_delay = max(self._rate_limit_delay, wait)
-                    if attempt < MAX_RETRIES - 1:
+                    if attempt < MAX_RETRIES_5XX - 1:
                         print(f"  Rate limit detected; waiting {wait:.0f}s then retrying...", file=sys.stderr)
                         _polite_sleep(wait)
                         continue
@@ -241,14 +258,17 @@ class Fetcher:
                 r = getattr(e, "response", None)
                 if r is not None:
                     code = getattr(r, "status_code", None)
-                    retryable = code in (403, 429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1
+                    max_attempts = MAX_RETRIES_5XX if _is_retryable_5xx(code) else MAX_RETRIES
+                    retryable = code in (403, 429, 500, 502, 503, 504) and attempt < max_attempts - 1
                     if retryable:
-                        wait = _parse_retry_after((r.headers or {}).get("retry-after")) or (RETRY_BACKOFF ** attempt)
+                        wait = _wait_for_retry(code, attempt, (r.headers or {}).get("retry-after"))
                         if code == 429:
                             wait = max(wait, 30.0)
                         self._rate_limit_delay = max(self._rate_limit_delay, wait)
                         if code == 429:
                             print(f"  Rate limit (429); waiting {wait:.0f}s then retrying...", file=sys.stderr)
+                        elif code == 502:
+                            print(f"  502 Bad Gateway; waiting {wait:.0f}s then retrying...", file=sys.stderr)
                         _polite_sleep(wait)
                         continue
                 raise
@@ -297,7 +317,7 @@ class Fetcher:
         if self._use_browser:
             ctx = self._get_browser_context()
             headers = {"Referer": self._page_url} if self._page_url else {}
-            for attempt in range(MAX_RETRIES):
+            for attempt in range(MAX_RETRIES_5XX):
                 attempt_timeout_ms = min(
                     timeout * (RETRY_BACKOFF ** attempt) * 1000,
                     MAX_TIMEOUT * 1000,
@@ -308,10 +328,14 @@ class Fetcher:
                     dest_path.write_bytes(resp.body())
                     return True
                 if resp.status == 403 and attempt < MAX_RETRIES - 1:
-                    wait = RETRY_BACKOFF ** attempt
-                    ra = (resp.headers or {}).get("retry-after", "").strip()
-                    if ra and ra.isdigit():
-                        wait = max(wait, float(ra))
+                    wait = _wait_for_retry(403, attempt, (resp.headers or {}).get("retry-after"))
+                    _polite_sleep(wait)
+                    continue
+                # 502/503/504: retry more times with longer waits (server often recovers)
+                if _is_retryable_5xx(resp.status) and attempt < MAX_RETRIES_5XX - 1:
+                    wait = _wait_for_retry(resp.status, attempt, (resp.headers or {}).get("retry-after"))
+                    if resp.status == 502:
+                        print(f"  502 Bad Gateway; waiting {wait:.0f}s then retrying...", file=sys.stderr)
                     _polite_sleep(wait)
                     continue
                 # IIIF 501 Not Implemented: try alternate size (full/full <-> full/max)
@@ -327,7 +351,7 @@ class Fetcher:
                     f"Client error '{resp.status} {resp.status_text}' for url '{url}'"
                 )
         last_exc: BaseException | None = None
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(MAX_RETRIES_5XX):
             attempt_timeout = min(timeout * (RETRY_BACKOFF ** attempt), MAX_TIMEOUT)
             try:
                 client = self._get_client()
@@ -357,14 +381,17 @@ class Fetcher:
                                     return True
                             except (httpx.HTTPStatusError, httpx.RequestError):
                                 pass
-                    retryable = code in (403, 429, 500, 502, 503, 504) and attempt < MAX_RETRIES - 1
+                    max_attempts = MAX_RETRIES_5XX if _is_retryable_5xx(code) else MAX_RETRIES
+                    retryable = code in (403, 429, 500, 502, 503, 504) and attempt < max_attempts - 1
                     if retryable:
-                        wait = _parse_retry_after((r.headers or {}).get("retry-after")) or (RETRY_BACKOFF ** attempt)
+                        wait = _wait_for_retry(code, attempt, (r.headers or {}).get("retry-after"))
                         if code == 429:
                             wait = max(wait, 30.0)
                         self._rate_limit_delay = max(self._rate_limit_delay, wait)
                         if code == 429:
                             print(f"  Rate limit (429); waiting {wait:.0f}s then retrying...", file=sys.stderr)
+                        elif code == 502:
+                            print(f"  502 Bad Gateway; waiting {wait:.0f}s then retrying...", file=sys.stderr)
                         _polite_sleep(wait)
                         continue
                 raise
