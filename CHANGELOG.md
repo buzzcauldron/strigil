@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+- **502/503/504 retries**: Fetcher retries transient server errors (502 Bad Gateway, etc.) up to 6 times with 5s base wait (browser and httpx paths). Reduces failures on flaky IIIF/library servers.
+
+### Changed
+- **GUI**: Responsive layout—buttons/checkboxes reflow with window; options split into two rows; single command build (`common_args` + `build_cmd`); `set_progress` helper; one `run_done_script_async`.
+
 ## [0.4.0] - 2025-02-06
 
 ### Added
