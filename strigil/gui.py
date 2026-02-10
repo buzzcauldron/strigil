@@ -50,6 +50,40 @@ SIZE_MEDIUM_MAX = 1024 * 1024
 SIZE_LARGE_MIN = 1024 * 1024
 
 
+def _size_to_arg(n: int) -> str:
+    """Format byte count as CLI size (e.g. 1024 -> '1k', 1048576 -> '1m')."""
+    if n >= 1024 * 1024:
+        return f"{n // (1024 * 1024)}m"
+    if n >= 1024:
+        return f"{n // 1024}k"
+    return str(n)
+
+
+def _image_size_args(small: bool, medium: bool, large: bool) -> list[str]:
+    """Return CLI args for --min-image-size/--max-image-size from size checkboxes."""
+    lows: list[int] = []
+    highs: list[int | None] = []
+    if small:
+        lows.append(0)
+        highs.append(SIZE_SMALL_MAX)
+    if medium:
+        lows.append(SIZE_MEDIUM_MIN)
+        highs.append(SIZE_MEDIUM_MAX)
+    if large:
+        lows.append(SIZE_LARGE_MIN)
+        highs.append(None)
+    if not lows:
+        return []
+    low = min(lows)
+    high = None if None in highs else max(h for h in highs if h is not None)
+    args: list[str] = []
+    if low > 0:
+        args.extend(["--min-image-size", _size_to_arg(low)])
+    if high is not None:
+        args.extend(["--max-image-size", _size_to_arg(high)])
+    return args
+
+
 def _open_folder(path: str) -> None:
     """Open path in the system file manager; create dir if missing."""
     if not path or not path.strip():
@@ -83,10 +117,10 @@ def main() -> None:
     content_frame = ttk.Frame(main_frame)
     content_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+    content_frame.columnconfigure(0, weight=1)
     url_row = ttk.Frame(content_frame)
     url_row.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=(0, 2))
     ttk.Label(url_row, text="URLs (one per line)").pack(side=tk.LEFT)
-    content_frame.columnconfigure(0, weight=1)
     urls_mode_var = tk.StringVar(value="sequential")
     urls_mode_frame = ttk.Frame(url_row)
     urls_mode_frame.pack(side=tk.RIGHT)
@@ -124,7 +158,6 @@ def main() -> None:
     ttk.Label(content_frame, text="Output directory").grid(row=2, column=0, sticky=tk.W, pady=(0, 2))
     out_row = ttk.Frame(content_frame)
     out_row.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
-    content_frame.columnconfigure(0, weight=1)
     out_var = tk.StringVar(value="output")
     out_entry = ttk.Entry(out_row, textvariable=out_var, width=50)
     out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
@@ -158,10 +191,11 @@ def main() -> None:
         variable=suggest_var,
         command=apply_suggested,
     )
-    suggest_cb.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    suggest_cb.grid(row=6, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
 
     types_frame = ttk.LabelFrame(content_frame, text="File types")
-    types_frame.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    types_frame.grid(row=7, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+    content_frame.columnconfigure(1, weight=1)
     type_pdf_var = tk.BooleanVar(value=True)
     type_text_var = tk.BooleanVar(value=True)
     type_images_var = tk.BooleanVar(value=True)
@@ -170,7 +204,7 @@ def main() -> None:
     ttk.Checkbutton(types_frame, text="Images", variable=type_images_var).pack(side=tk.LEFT)
 
     size_frame = ttk.LabelFrame(content_frame, text="Image size (include)")
-    size_frame.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    size_frame.grid(row=8, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
     size_small_var = tk.BooleanVar(value=True)
     size_medium_var = tk.BooleanVar(value=True)
     size_large_var = tk.BooleanVar(value=True)
@@ -179,18 +213,21 @@ def main() -> None:
     ttk.Checkbutton(size_frame, text="Large (> 1 MB)", variable=size_large_var).pack(side=tk.LEFT)
 
     opts_frame = ttk.Frame(content_frame)
-    opts_frame.grid(row=9, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+    opts_frame.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
     suggested = suggest_aggressiveness()
     initial_params = get_aggressiveness_params("auto")
     delay_var = tk.DoubleVar(value=initial_params["delay"])
     workers_var = tk.IntVar(value=initial_params["workers"])
-    ttk.Label(opts_frame, text="Delay (s):").pack(side=tk.LEFT)
-    delay_spin = ttk.Spinbox(opts_frame, from_=0.25, to=10, increment=0.25, width=5, textvariable=delay_var)
+    # Row 0: delay, aggressiveness, workers, JS, FlareSolverr
+    row0 = ttk.Frame(opts_frame)
+    row0.pack(fill=tk.X, pady=(0, 4))
+    ttk.Label(row0, text="Delay (s):").pack(side=tk.LEFT)
+    delay_spin = ttk.Spinbox(row0, from_=0.25, to=10, increment=0.25, width=5, textvariable=delay_var)
     delay_spin.pack(side=tk.LEFT, padx=(4, 12))
-    ttk.Label(opts_frame, text="Aggressiveness:").pack(side=tk.LEFT, padx=(8, 4))
+    ttk.Label(row0, text="Aggressiveness:").pack(side=tk.LEFT, padx=(8, 4))
     agg_var = tk.StringVar(value="auto")
     agg_combo = ttk.Combobox(
-        opts_frame,
+        row0,
         textvariable=agg_var,
         values=("auto", "conservative", "balanced", "aggressive"),
         state="readonly",
@@ -212,34 +249,37 @@ def main() -> None:
 
     js_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(
-        opts_frame,
+        row0,
         text="Use JavaScript (needed for NYPL, etc.)",
         variable=js_var,
-    ).pack(side=tk.LEFT, padx=(0, 8))
+    ).pack(side=tk.LEFT, padx=(8, 8))
     flaresolverr_var = tk.BooleanVar(value=False)
     flaresolverr_url_var = tk.StringVar(value="")
     ttk.Checkbutton(
-        opts_frame,
+        row0,
         text="FlareSolverr (Cloudflare bypass)",
         variable=flaresolverr_var,
     ).pack(side=tk.LEFT, padx=(0, 4))
-    ttk.Label(opts_frame, text="URL:").pack(side=tk.LEFT, padx=(0, 2))
-    flaresolverr_entry = ttk.Entry(opts_frame, textvariable=flaresolverr_url_var, width=22)
-    flaresolverr_entry.pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Label(row0, text="URL:").pack(side=tk.LEFT, padx=(0, 2))
+    flaresolverr_entry = ttk.Entry(row0, textvariable=flaresolverr_url_var, width=22)
+    flaresolverr_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+    # Row 1: crawl, depth, same domain, workers
+    row1 = ttk.Frame(opts_frame)
+    row1.pack(fill=tk.X)
     crawl_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(
-        opts_frame,
+        row1,
         text="Follow links (crawl subtrees for images)",
         variable=crawl_var,
     ).pack(side=tk.LEFT, padx=(0, 8))
     depth_var = tk.IntVar(value=2)
-    ttk.Label(opts_frame, text="Max depth:").pack(side=tk.LEFT, padx=(8, 0))
-    depth_spin = ttk.Spinbox(opts_frame, from_=1, to=10, width=3, textvariable=depth_var)
+    ttk.Label(row1, text="Max depth:").pack(side=tk.LEFT, padx=(8, 0))
+    depth_spin = ttk.Spinbox(row1, from_=1, to=10, width=3, textvariable=depth_var)
     depth_spin.pack(side=tk.LEFT, padx=(4, 8))
     same_domain_var = tk.BooleanVar(value=True)
-    ttk.Checkbutton(opts_frame, text="Same domain only", variable=same_domain_var).pack(side=tk.LEFT)
-    ttk.Label(opts_frame, text="Workers:").pack(side=tk.LEFT, padx=(8, 0))
-    workers_spin = ttk.Spinbox(opts_frame, from_=1, to=12, width=2, textvariable=workers_var)
+    ttk.Checkbutton(row1, text="Same domain only", variable=same_domain_var).pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Label(row1, text="Workers:").pack(side=tk.LEFT, padx=(8, 0))
+    workers_spin = ttk.Spinbox(row1, from_=1, to=12, width=2, textvariable=workers_var)
     workers_spin.pack(side=tk.LEFT, padx=(4, 0))
 
     keep_awake_var = tk.BooleanVar(value=False)
@@ -247,11 +287,10 @@ def main() -> None:
         content_frame,
         text="Keep system awake (for long scrapes)",
         variable=keep_awake_var,
-    ).grid(row=10, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+    ).grid(row=10, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
 
     log_frame = ttk.LabelFrame(content_frame, text="Log")
     log_frame.grid(row=11, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
-    content_frame.columnconfigure(0, weight=1)
     content_frame.rowconfigure(11, weight=1)
 
     log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
@@ -288,6 +327,15 @@ def main() -> None:
     current_procs: list[subprocess.Popen] = []
     procs_lock = threading.Lock()
 
+    def run_done_script_async(script: str, out: str) -> None:
+        if not script:
+            return
+        cmd = script.strip().replace("{out_dir}", os.path.abspath(out))
+        try:
+            subprocess.run(cmd, shell=True, check=False)
+        except Exception:
+            pass
+
     def run_scrape(scrape_btn_ref: tk.Widget, stop_btn_ref: tk.Widget) -> None:
         urls = [
             line.strip()
@@ -304,36 +352,35 @@ def main() -> None:
         scrape_counts: list[int] = [0, 0, 0]  # pdf, text, images
         run_parallel = urls_mode_var.get() == "parallel" and len(urls) > 1
 
+        def set_progress(msg: str, finished: bool = False) -> None:
+            state_var.set("Finished" if finished else "Running")
+            progress_var.set(msg)
+
         def update_status(line: str) -> None:
             if "Running:" in line or "Scrape:" in line or "Iteration" in line:
-                state_var.set("Running")
-                progress_var.set("Starting…")
+                set_progress("Starting…")
             elif "Found:" in line:
-                state_var.set("Running")
-                progress_var.set("Mapping done — downloading…")
+                set_progress("Mapping done — downloading…")
             elif "→ Downloading" in line:
-                state_var.set("Running")
-                progress_var.set("Downloading…")
+                set_progress("Downloading…")
             elif "  [" in line and "/" in line and "] " in line:
                 m = re.search(r"  \[(\d+)/(\d+)\]", line)
                 if m:
-                    state_var.set("Running")
-                    progress_var.set(f"{m.group(1)}/{m.group(2)} assets")
+                    set_progress(f"{m.group(1)}/{m.group(2)} assets")
             elif "  Text:" in line:
                 scrape_counts[1] += 1
-                state_var.set("Running")
-                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                set_progress(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
             elif "  Image:" in line:
                 scrape_counts[2] += 1
-                state_var.set("Running")
-                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                set_progress(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
             elif "  PDF:" in line:
                 scrape_counts[0] += 1
-                state_var.set("Running")
-                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                set_progress(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
             elif "Done." in line:
-                state_var.set("Finished")
-                progress_var.set(f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images")
+                set_progress(
+                    f"{scrape_counts[0]} PDFs, {scrape_counts[1]} texts, {scrape_counts[2]} images",
+                    finished=True,
+                )
 
         try:
             delay = float(delay_var.get())
@@ -356,104 +403,46 @@ def main() -> None:
             selected_types.append("text")
         if type_images_var.get():
             selected_types.append("images")
-        if selected_types and len(selected_types) < 3:
-            pass
-        elif not selected_types:
+        if not selected_types:
             append_log("Error: Select at least one file type.\n")
             state_var.set("Idle")
             progress_var.set("—")
             scrape_btn_ref.config(state=tk.NORMAL)
             return
 
-        def _size_to_arg(n: int) -> str:
-            if n >= 1024 * 1024:
-                return f"{n // (1024 * 1024)}m"
-            if n >= 1024:
-                return f"{n // 1024}k"
-            return str(n)
-
-        lows: list[int] = []
-        highs: list[int | None] = []
-        if size_small_var.get():
-            lows.append(0)
-            highs.append(SIZE_SMALL_MAX)
-        if size_medium_var.get():
-            lows.append(SIZE_MEDIUM_MIN)
-            highs.append(SIZE_MEDIUM_MAX)
-        if size_large_var.get():
-            lows.append(SIZE_LARGE_MIN)
-            highs.append(None)  # no max
-        if lows:
-            low = min(lows)
-            high = None if None in highs else max(h for h in highs if h is not None)
-            if low > 0:
-                base_cmd.extend(["--min-image-size", _size_to_arg(low)])
-            if high is not None:
-                base_cmd.extend(["--max-image-size", _size_to_arg(high)])
+        common_args = base_cmd.copy()
+        common_args.extend(
+            _image_size_args(
+                size_small_var.get(),
+                size_medium_var.get(),
+                size_large_var.get(),
+            )
+        )
         if js_var.get():
-            base_cmd.append("--js")
+            common_args.append("--js")
         if flaresolverr_var.get():
             url_opt = flaresolverr_url_var.get().strip()
-            if url_opt:
-                base_cmd.extend(["--flaresolverr", url_opt])
-            else:
-                base_cmd.append("--flaresolverr")
+            common_args.extend(["--flaresolverr", url_opt] if url_opt else ["--flaresolverr"])
         if crawl_var.get():
-            base_cmd.extend(["--crawl", "--max-depth", str(depth)])
+            common_args.extend(["--crawl", "--max-depth", str(depth)])
             try:
                 w = int(workers_var.get())
-                w = max(1, min(12, w))
-                base_cmd.extend(["--workers", str(w)])
+                common_args.extend(["--workers", str(max(1, min(12, w)))])
             except (ValueError, tk.TclError):
                 pass
             if same_domain_var.get():
-                base_cmd.append("--same-domain-only")
-        done_script = done_script_var.get().strip()
-        if done_script:
-            base_cmd.extend(["--done-script", done_script])
+                common_args.append("--same-domain-only")
         if keep_awake_var.get():
-            base_cmd.append("--keep-awake")
+            common_args.append("--keep-awake")
 
-        def build_cmd(url_list: list[str]) -> list[str]:
-            c = base_cmd + ["--url"] + url_list + [
-                "--out-dir", out_var.get().strip() or "output",
-                "--delay", str(delay),
-            ]
-            if selected_types and len(selected_types) < 3:
-                c.extend(["--types"] + selected_types)
-            lows: list[int] = []
-            highs: list[int | None] = []
-            if size_small_var.get():
-                lows.append(0)
-                highs.append(SIZE_SMALL_MAX)
-            if size_medium_var.get():
-                lows.append(SIZE_MEDIUM_MIN)
-                highs.append(SIZE_MEDIUM_MAX)
-            if size_large_var.get():
-                lows.append(SIZE_LARGE_MIN)
-                highs.append(None)
-            if lows:
-                low = min(lows)
-                high = None if None in highs else max(h for h in highs if h is not None)
-                if low > 0:
-                    c.extend(["--min-image-size", _size_to_arg(low)])
-                if high is not None:
-                    c.extend(["--max-image-size", _size_to_arg(high)])
-            if crawl_var.get():
-                c.extend(["--crawl", "--max-depth", str(depth)])
-                try:
-                    w = int(workers_var.get())
-                    w = max(1, min(12, w))
-                    c.extend(["--workers", str(w)])
-                except (ValueError, tk.TclError):
-                    pass
-                if same_domain_var.get():
-                    c.append("--same-domain-only")
-            done_script = done_script_var.get().strip()
-            if done_script and not run_parallel:
+        done_script = done_script_var.get().strip()
+        out_dir = out_var.get().strip() or "output"
+        types_args = ["--types"] + selected_types if selected_types and len(selected_types) < 3 else []
+
+        def build_cmd(url_list: list[str], include_done_script: bool = False) -> list[str]:
+            c = common_args + ["--url"] + url_list + ["--out-dir", out_dir, "--delay", str(delay)] + types_args
+            if include_done_script and done_script:
                 c.extend(["--done-script", done_script])
-            if keep_awake_var.get():
-                c.append("--keep-awake")
             return c
 
         def log_size_filter() -> None:
@@ -512,26 +501,15 @@ def main() -> None:
                 except queue.Empty:
                     pass
                 if parallel_done_count[0] >= num_urls:
-                    ds = done_script_var.get().strip()
-                    if ds:
-                        root.after(0, lambda: run_done_script_async(ds, out_var.get().strip() or "output"))
+                    if done_script:
+                        root.after(0, lambda: run_done_script_async(done_script, out_dir))
                     root.after(0, lambda: (stop_btn_ref.config(state=tk.DISABLED), btn.config(state=tk.NORMAL)))
                 else:
                     root.after(150, lambda: poll_queue_parallel(btn))
 
-            def run_done_script_async(script: str, out: str) -> None:
-                if not script:
-                    return
-                import subprocess as sp
-                cmd = script.strip().replace("{out_dir}", os.path.abspath(out))
-                try:
-                    sp.run(cmd, shell=True, check=False)
-                except Exception:
-                    pass
-
             poll_queue_parallel(scrape_btn_ref)
         else:
-            cmd = build_cmd(urls)
+            cmd = build_cmd(urls, include_done_script=True)
 
             def worker() -> None:
                 try:
