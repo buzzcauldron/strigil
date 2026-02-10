@@ -17,7 +17,7 @@
   With `--js`, one Playwright context is reused for the initial page and all asset requests. Cookies from the first load apply to images/PDFs, which avoids 403 on Morgan (and similar) sites.
 
 - **Retries and backoff**  
-  httpx path retries on 429/5xx with exponential backoff; browser path is single-shot, which is acceptable for interactive pages.
+  Both httpx and browser paths retry on 429 and 5xx (500, 502, 503, 504). For 5xx the fetcher uses more attempts (6) and a longer base wait (5s) so flaky IIIF/library servers often recover.
 
 - **Extractors**  
   `find_image_urls` covers `img[src]`, `srcset`, `data-src`, `data-lazy-src`, `data-original`, `data-srcset`, and `<source srcset>`. Thumb→full heuristics and favicon skip are in place.

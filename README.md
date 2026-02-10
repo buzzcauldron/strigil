@@ -88,6 +88,8 @@ When the scraper receives **HTTP 429 (Too Many Requests)** or a **200 response w
 - Waits before retrying: uses the **Retry-After** header when present (seconds or HTTP-date), otherwise 30–60s.
 - **Throttles subsequent requests**: a per-Fetcher delay is applied so all following requests (HTML, images, HEADs) are slowed until the backend recovers. The delay decays gradually after successful responses.
 
+**502/503/504** (Bad Gateway, Service Unavailable, Gateway Timeout) are retried up to 6 times with a 5s base wait so flaky upstream servers (e.g. IIIF image servers) often succeed on retry.
+
 Sites like Archive-It that return a rate-limit message in the HTML body are handled the same way: wait, retry, and throttle.
 
 ### Iterations and auto timeout (single-page)
