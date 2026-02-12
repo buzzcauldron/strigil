@@ -116,6 +116,16 @@ def main() -> None:
         help="Fetch HTML via FlareSolverr to bypass Cloudflare (default: FLARESOLVERR_URL or http://localhost:8191).",
     )
     parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Run browser visibly (not headless). Use for Cloudflare-protected sites that block headless.",
+    )
+    parser.add_argument(
+        "--human-bypass",
+        action="store_true",
+        help="Pause for you to solve Cloudflare/CAPTCHA in the browser, then continue. Requires --js, uses headed browser.",
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
         default=3,
@@ -153,6 +163,11 @@ def main() -> None:
         metavar="MODE",
         help="Scrape speed vs politeness: auto (detect from hardware), conservative, balanced, aggressive.",
     )
+    parser.add_argument(
+        "--no-robots",
+        action="store_true",
+        help="Ignore robots.txt (use only when you have permission).",
+    )
     args = parser.parse_args()
 
     if getattr(args, "hardware", False):
@@ -184,6 +199,9 @@ def main() -> None:
         args.flaresolverr_url = (args.flaresolverr.strip() or get_flaresolverr_url() or DEFAULT_FLARESOLVERR_URL)
     else:
         args.flaresolverr_url = get_flaresolverr_url()
+
+    if getattr(args, "human_bypass", False):
+        args.js = True  # human bypass requires browser
 
     if not args.url or not [u for u in args.url if u and str(u).strip()]:
         parser.error("At least one URL is required (or use --hardware to print hardware info).")
@@ -226,8 +244,11 @@ def main() -> None:
                 crawl_parallel(
                     url, out_dir, args.delay, args.max_depth,
                     args.same_domain_only, limit, types_set, workers, use_progress,
-                    min_image_size, max_image_size, use_browser=False,
+                    min_image_size, max_image_size, use_browser=args.js,
                     flaresolverr_url=getattr(args, "flaresolverr_url", None),
+                    no_robots=getattr(args, "no_robots", False),
+                    headed=getattr(args, "headed", False),
+                    human_bypass=getattr(args, "human_bypass", False),
                 )
             else:
                 eff_workers = 1 if (args.crawl and args.js) else workers
