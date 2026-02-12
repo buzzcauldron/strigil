@@ -103,6 +103,21 @@ On 403 or slow responses, the scraper retries automatically:
 strigil --url https://strict.site/page --max-iterations 5
 ```
 
+### Cloudflare-protected sites (e.g. syri.ac)
+
+Sites behind Cloudflare bot protection often block automation. Use `--human-bypass` to solve the challenge yourself:
+
+```bash
+strigil --url https://syri.ac/digimss/... --human-bypass --no-robots --crawl --max-depth 3
+```
+
+1. A browser window opens and loads the page.
+2. If Cloudflare appears, solve the challenge (e.g. click "Verify you are human").
+3. When the real page has loaded, return to the terminal and press **Enter**.
+4. Strigil continues scraping using your authenticated session.
+
+`--human-bypass` implies `--js` and uses a headed browser. For crawl mode, omit `--same-domain-only` to follow cross-domain links to manuscript viewers.
+
 ## Building a standalone bundle
 
 To build a standalone folder with the CLI and GUI (no Python required on the target machine):

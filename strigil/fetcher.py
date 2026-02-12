@@ -97,11 +97,15 @@ class Fetcher:
         headers: dict[str, str] | None = None,
         use_browser: bool = False,
         flaresolverr_url: str | None = None,
+        headed: bool = False,
+        human_bypass: bool = False,
     ) -> None:
         self._timeout = timeout
         self._headers = {**DEFAULT_HEADERS, **(headers or {})}
         self._use_browser = use_browser
         self._flaresolverr_url = flaresolverr_url
+        self._headed = headed or human_bypass  # human bypass requires visible browser
+        self._human_bypass = human_bypass
         self._client: httpx.Client | None = None
         # Playwright: one context per Fetcher so cookies from first page load apply to assets
         self._playwright = None
@@ -123,6 +127,9 @@ class Fetcher:
             timeout=self._timeout,
             headers=self._headers,
             use_browser=self._use_browser,
+            flaresolverr_url=self._flaresolverr_url,
+            headed=self._headed,
+            human_bypass=self._human_bypass,
         )
 
     def _get_client(self) -> httpx.Client:
@@ -145,23 +152,33 @@ class Fetcher:
                 "Browser fetch (--js) requires: pip install strigil && playwright install"
             ) from e
         self._playwright = sync_playwright().start()
+        headless = not self._headed
+        launch_args = [] if headless else ["--disable-blink-features=AutomationControlled"]
         try:
-            self._browser = self._playwright.chromium.launch(headless=True)
+            self._browser = self._playwright.chromium.launch(
+                headless=headless,
+                args=launch_args,
+            )
         except Exception as e:
             exc_str = str(e).lower()
             if "executable doesn't exist" in exc_str or "executable does not exist" in exc_str:
                 import subprocess
-                import sys
                 print("Installing Playwright Chromium (one-time)...", file=sys.stderr)
                 subprocess.run(
                     [sys.executable, "-m", "playwright", "install", "chromium"],
                     check=True,
                     timeout=300,
                 )
-                self._browser = self._playwright.chromium.launch(headless=True)
+                self._browser = self._playwright.chromium.launch(
+                    headless=headless,
+                    args=launch_args,
+                )
             else:
                 raise
-        self._browser_context = self._browser.new_context()
+        self._browser_context = self._browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            user_agent=DEFAULT_USER_AGENT,
+        )
         return self._browser_context
 
     def close(self) -> None:
@@ -222,6 +239,22 @@ class Fetcher:
                     except Exception:
                         time.sleep(2 if networkidle_timeout > 5000 else 1.5)
                     html = page.content()
+                    # Cloudflare challenge: "Just a moment..." page
+                    if "Just a moment" in html or "_cf_chl_opt" in html or "challenge-platform" in html:
+                        if self._human_bypass:
+                            print(
+                                "\nCloudflare challenge detected. Solve it in the browser window, "
+                                "then press Enter here to continue...",
+                                file=sys.stderr,
+                            )
+                            input()
+                            html = page.content()
+                        else:
+                            for _ in range(20):  # up to ~20 seconds
+                                time.sleep(1)
+                                html = page.content()
+                                if "Just a moment" not in html and "_cf_chl_opt" not in html:
+                                    break
                     return html.encode("utf-8"), "utf-8"
                 except Exception as e:
                     last_exc = e
