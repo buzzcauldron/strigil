@@ -697,6 +697,8 @@ def run_single_or_sequential_crawl(
     with Fetcher(
         use_browser=args.js,
         flaresolverr_url=getattr(args, "flaresolverr_url", None),
+        headed=getattr(args, "headed", False),
+        human_bypass=getattr(args, "human_bypass", False),
     ) as fetcher:
         if args.crawl:
             start_domain = urlparse(args.url).netloc
@@ -717,7 +719,7 @@ def run_single_or_sequential_crawl(
                         continue
                     if same_domain_only and urlparse(url).netloc != start_domain:
                         continue
-                    if not can_fetch(url):
+                    if not getattr(args, "no_robots", False) and not can_fetch(url):
                         print(f"Skip (robots): {url}", file=sys.stderr)
                         continue
                     seen.add(url)
@@ -781,7 +783,7 @@ def run_single_or_sequential_crawl(
                         if still:
                             _write_failed_urls(out_dir, dom, still)
         else:
-            if not can_fetch(args.url):
+            if not getattr(args, "no_robots", False) and not can_fetch(args.url):
                 print("robots.txt disallows this URL.", file=sys.stderr)
                 sys.exit(1)
             domain = sanitize_domain(args.url)
@@ -820,6 +822,8 @@ def run_single_or_sequential_crawl(
                         timeout=timeout_i,
                         use_browser=use_browser,
                         flaresolverr_url=getattr(args, "flaresolverr_url", None),
+                        headed=getattr(args, "headed", False),
+                        human_bypass=getattr(args, "human_bypass", False),
                     ) as iter_fetcher:
                         want = types_set or VALID_TYPES
                         if getattr(args, "map_first", True):
@@ -937,6 +941,9 @@ def crawl_parallel(
     flaresolverr_url: str | None = None,
     retry_failed: bool = True,
     retry_timeout: float = 90,
+    no_robots: bool = False,
+    headed: bool = False,
+    human_bypass: bool = False,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -957,7 +964,7 @@ def crawl_parallel(
         pbar = tqdm(desc="Crawl", unit=" page", file=sys.stderr) if (tqdm and use_progress) else None
 
         def process_one(url: str, depth: int, fetcher: Fetcher) -> list[str]:
-            if not can_fetch(url):
+            if not no_robots and not can_fetch(url):
                 return []
             domain = sanitize_domain(url)
             with manifest_lock:
@@ -982,7 +989,12 @@ def crawl_parallel(
 
         def worker() -> None:
             nonlocal pending
-            fetcher = Fetcher(use_browser=use_browser, flaresolverr_url=flaresolverr_url)
+            fetcher = Fetcher(
+                use_browser=use_browser,
+                flaresolverr_url=flaresolverr_url,
+                headed=headed,
+                human_bypass=human_bypass,
+            )
             try:
                 while True:
                     item = work_queue.get()
