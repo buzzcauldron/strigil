@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 - **502/503/504 retries**: Fetcher retries transient server errors (502 Bad Gateway, etc.) up to 6 times with 5s base wait (browser and httpx paths). Reduces failures on flaky IIIF/library servers.
+- **Failed-asset retry**: Failed image/PDF URLs (timeouts or after fetcher retries) are collected and retried in a second pass with longer timeout (default 90s) and sequential downloads. `--no-retry-failed` disables this; `--retry-timeout SECS` sets the retry timeout. Still-failed URLs are written to `output/<domain>/failed_urls.txt`.
 
 ### Changed
 - **GUI**: Responsive layout—buttons/checkboxes reflow with window; options split into two rows; single command build (`common_args` + `build_cmd`); `set_progress` helper; one `run_done_script_async`.

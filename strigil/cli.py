@@ -153,6 +153,26 @@ def main() -> None:
         metavar="MODE",
         help="Scrape speed vs politeness: auto (detect from hardware), conservative, balanced, aggressive.",
     )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        default=True,
+        dest="retry_failed",
+        help="Retry failed image/PDF downloads once with longer timeout (default).",
+    )
+    parser.add_argument(
+        "--no-retry-failed",
+        action="store_false",
+        dest="retry_failed",
+        help="Do not retry failed assets.",
+    )
+    parser.add_argument(
+        "--retry-timeout",
+        type=float,
+        default=90,
+        metavar="SECS",
+        help="Timeout in seconds for the retry pass (default: 90).",
+    )
     args = parser.parse_args()
 
     if getattr(args, "hardware", False):
@@ -228,6 +248,8 @@ def main() -> None:
                     args.same_domain_only, limit, types_set, workers, use_progress,
                     min_image_size, max_image_size, use_browser=False,
                     flaresolverr_url=getattr(args, "flaresolverr_url", None),
+                    retry_failed=getattr(args, "retry_failed", True),
+                    retry_timeout=getattr(args, "retry_timeout", 90),
                 )
             else:
                 eff_workers = 1 if (args.crawl and args.js) else workers

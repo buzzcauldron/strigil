@@ -1,5 +1,7 @@
 """Scraping pipeline: map pages, scrape assets, crawl. Used by CLI and programmatic callers."""
 
+from __future__ import annotations
+
 import sys
 import threading
 import time
@@ -242,6 +244,7 @@ def scrape_assets(
     delay: float,
     use_browser: bool,
     progress_callback: Callable[[str | tuple], None] | None = None,
+    failed_list: list | None = None,
 ) -> None:
     """
     Download mapped PDFs and images in parallel (when not use_browser).
@@ -332,7 +335,11 @@ def scrape_assets(
                     types_map[url] = ct or "image"
                     return True
                 except Exception:
+                    if failed_list is not None:
+                        failed_list.append((best_url, dest, ct or "image", url))
                     return False
+            if failed_list is not None:
+                failed_list.append((best_url, dest, ct or "image", url))
             return False
 
     effective_workers = _effective_asset_workers(work, workers, use_browser)
@@ -386,6 +393,8 @@ def scrape_page(
     max_image_size: int | None = None,
     same_domain_for_links: str | None = ...,  # None = all links; str = filter; omit = page domain
     asset_workers: int = 1,
+    failed_list: list | None = None,
+    failed_list_lock: threading.Lock | None = None,
 ) -> list[str]:
     """
     Scrape a single page: PDFs, text, images (according to types).
@@ -500,8 +509,12 @@ def scrape_page(
                             progress_callback("image")
                         print(f"  Image: {map_key}", file=sys.stderr)
                     except Exception as inner_e:
+                        if failed_list is not None:
+                            failed_list.append((fetch_url, dest, ct, map_key))
                         print(f"  Image fail {map_key}: {inner_e}", file=sys.stderr)
                 else:
+                    if failed_list is not None:
+                        failed_list.append((fetch_url, dest, ct, map_key))
                     print(f"  {'PDF' if ct == 'application/pdf' else 'Image'} fail {map_key}: {e}", file=sys.stderr)
     else:
         effective = _effective_asset_workers_for_tasks(asset_tasks, asset_workers)
@@ -555,6 +568,10 @@ def scrape_page(
                     try:
                         result = fut.result()
                     except Exception as e:
+                        lock = failed_list_lock if failed_list_lock is not None else manifest_lock
+                        with lock:
+                            if failed_list is not None:
+                                failed_list.append((fetch_url, dest, ct, map_key))
                         print(f"  {'PDF' if ct == 'application/pdf' else 'Image'} fail {map_key}: {e}", file=sys.stderr)
                         continue
                     if result is None:
@@ -563,6 +580,10 @@ def scrape_page(
                     with manifest_lock:
                         urls_map[_map_key] = str(_dest)
                         types_map[_map_key] = _ct
+                    if status.startswith("fail:") and failed_list is not None:
+                        lock = failed_list_lock if failed_list_lock is not None else manifest_lock
+                        with lock:
+                            failed_list.append((fetch_url, dest, _ct, _map_key))
                     if status.startswith("fail:"):
                         print(f"  {'PDF' if _ct == 'application/pdf' else 'Image'} fail {_map_key}: {status[5:]}", file=sys.stderr)
                     else:
@@ -582,6 +603,70 @@ def scrape_page(
         return []
     domain_filter = urlparse(url).netloc if same_domain_for_links is ... else same_domain_for_links
     return find_page_links(soup, url, domain_filter)
+
+
+# Failed asset item: (fetch_url, dest, content_type, map_key)
+FailedAssetItem = tuple[str, Path, str, str]
+
+
+def retry_failed_assets(
+    failed_list: list[FailedAssetItem],
+    fetcher: Fetcher,
+    delay: float,
+    manifest: dict,
+    mf_path: Path,
+) -> tuple[int, list[FailedAssetItem]]:
+    """
+    Retry downloading failed assets sequentially. Updates manifest on success.
+    Returns (succeeded_count, still_failed_list).
+    """
+    urls_map = manifest.setdefault("urls", {})
+    types_map = manifest.setdefault("types", {})
+    still_failed: list[FailedAssetItem] = []
+    succeeded = 0
+    for fetch_url, dest, ct, map_key in failed_list:
+        try:
+            fetcher.fetch_binary(fetch_url, dest, delay=delay)
+            urls_map[map_key] = str(dest)
+            types_map[map_key] = ct
+            succeeded += 1
+        except Exception:
+            still_failed.append((fetch_url, dest, ct, map_key))
+    return (succeeded, still_failed)
+
+
+def _group_failed_by_domain(
+    failed_list: list[FailedAssetItem],
+    out_dir: Path,
+) -> dict[str, list[FailedAssetItem]]:
+    """Group failed items by domain (derived from dest path: out_dir/domain/...)."""
+    by_domain: dict[str, list[FailedAssetItem]] = {}
+    for item in failed_list:
+        fetch_url, dest, ct, map_key = item
+        try:
+            rel = dest.relative_to(out_dir)
+        except ValueError:
+            continue
+        domain = rel.parts[0] if rel.parts else ""
+        by_domain.setdefault(domain, []).append(item)
+    return by_domain
+
+
+def _write_failed_urls(out_dir: Path, domain: str, still_failed: list[FailedAssetItem]) -> None:
+    """Write still-failed URLs to failed_urls.txt and destination file names to errata (same folder)."""
+    if not still_failed:
+        return
+    folder = out_dir / domain
+    folder.mkdir(parents=True, exist_ok=True)
+    urls_path = folder / "failed_urls.txt"
+    with open(urls_path, "w", encoding="utf-8") as f:
+        for _fetch_url, _dest, _ct, map_key in still_failed:
+            f.write(map_key + "\n")
+    errata_path = folder / "errata"
+    with open(errata_path, "w", encoding="utf-8") as f:
+        for _fetch_url, dest, _ct, _map_key in still_failed:
+            f.write(dest.name + "\n")
+    print(f"  Wrote {len(still_failed)} still-failed URL(s) to {urls_path}, file names to {errata_path}", file=sys.stderr)
 
 
 def run_done_script(cmd: str, out_dir: Path) -> None:
@@ -607,6 +692,8 @@ def run_single_or_sequential_crawl(
     max_image_size: int | None,
 ) -> None:
     """Single-page scrape or sequential crawl (workers=1)."""
+    retry_failed = getattr(args, "retry_failed", True)
+    retry_timeout = getattr(args, "retry_timeout", 90)
     with Fetcher(
         use_browser=args.js,
         flaresolverr_url=getattr(args, "flaresolverr_url", None),
@@ -615,6 +702,7 @@ def run_single_or_sequential_crawl(
             start_domain = urlparse(args.url).netloc
             same_domain_only = args.same_domain_only
             retried_cross_domain = False
+            failed_list: list[FailedAssetItem] = [] if retry_failed else []
 
             def run_crawl() -> set[str]:
                 print(f"  → Crawl started (max depth {args.max_depth})...", file=sys.stderr)
@@ -644,6 +732,7 @@ def run_single_or_sequential_crawl(
                             min_image_size=min_image_size,
                             max_image_size=max_image_size,
                             same_domain_for_links=link_filter,
+                            failed_list=failed_list if retry_failed else None,
                         )
                         if use_progress:
                             pbar.set_postfix(queue=len(q))
@@ -672,12 +761,32 @@ def run_single_or_sequential_crawl(
                 same_domain_only = False
                 retried_cross_domain = True
                 seen = run_crawl()
+            if retry_failed and failed_list:
+                print(f"  Retrying {len(failed_list)} failed asset(s)...", file=sys.stderr)
+                by_domain = _group_failed_by_domain(failed_list, out_dir)
+                for dom, items in by_domain.items():
+                    mf_path = manifest_path(out_dir, dom)
+                    dom_manifest = load_manifest(mf_path)
+                    with Fetcher(
+                        timeout=retry_timeout,
+                        use_browser=args.js,
+                        flaresolverr_url=getattr(args, "flaresolverr_url", None),
+                    ) as retry_fetcher:
+                        succ, still = retry_failed_assets(
+                            items, retry_fetcher, args.delay, dom_manifest, mf_path,
+                        )
+                        save_manifest(mf_path, dom_manifest)
+                        if succ:
+                            print(f"  Retried {dom}: {succ} succeeded", file=sys.stderr)
+                        if still:
+                            _write_failed_urls(out_dir, dom, still)
         else:
             if not can_fetch(args.url):
                 print("robots.txt disallows this URL.", file=sys.stderr)
                 sys.exit(1)
             domain = sanitize_domain(args.url)
             manifest = load_manifest(manifest_path(out_dir, domain))
+            failed_list_sp: list[FailedAssetItem] = [] if retry_failed else []
             max_iterations = max(1, getattr(args, "max_iterations", 3))
             had_403 = False
             last_exc: BaseException | None = None
@@ -750,7 +859,23 @@ def run_single_or_sequential_crawl(
                                 delay_i,
                                 use_browser,
                                 progress_cb,
+                                failed_list=failed_list_sp if retry_failed else None,
                             )
+                            if retry_failed and failed_list_sp:
+                                print(f"  Retrying {len(failed_list_sp)} failed asset(s)...", file=sys.stderr)
+                                with Fetcher(
+                                    timeout=retry_timeout,
+                                    use_browser=use_browser,
+                                    flaresolverr_url=getattr(args, "flaresolverr_url", None),
+                                ) as retry_fetcher:
+                                    succ, still = retry_failed_assets(
+                                        failed_list_sp, retry_fetcher, delay_i, manifest,
+                                        manifest_path(out_dir, domain),
+                                    )
+                                    if succ:
+                                        print(f"  Retried: {succ} succeeded", file=sys.stderr)
+                                    if still:
+                                        _write_failed_urls(out_dir, domain, still)
                             save_manifest(manifest_path(out_dir, domain), manifest)
                         else:
                             print("  → Fetching and extracting page...", file=sys.stderr)
@@ -760,7 +885,24 @@ def run_single_or_sequential_crawl(
                                 progress_callback=progress_cb,
                                 min_image_size=min_image_size,
                                 max_image_size=max_image_size,
+                                failed_list=failed_list_sp if retry_failed else None,
                             )
+                            if retry_failed and failed_list_sp:
+                                print(f"  Retrying {len(failed_list_sp)} failed asset(s)...", file=sys.stderr)
+                                with Fetcher(
+                                    timeout=retry_timeout,
+                                    use_browser=use_browser,
+                                    flaresolverr_url=getattr(args, "flaresolverr_url", None),
+                                ) as retry_fetcher:
+                                    succ, still = retry_failed_assets(
+                                        failed_list_sp, retry_fetcher, delay_i, manifest,
+                                        manifest_path(out_dir, domain),
+                                    )
+                                    if succ:
+                                        print(f"  Retried: {succ} succeeded", file=sys.stderr)
+                                    if still:
+                                        _write_failed_urls(out_dir, domain, still)
+                            save_manifest(manifest_path(out_dir, domain), manifest)
                 except Exception as e:
                     last_exc = e
                     if is_403(e) and iteration < max_iterations - 1:
@@ -793,6 +935,8 @@ def crawl_parallel(
     *,
     use_browser: bool = False,
     flaresolverr_url: str | None = None,
+    retry_failed: bool = True,
+    retry_timeout: float = 90,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -808,6 +952,8 @@ def crawl_parallel(
         manifest_lock = threading.Lock()
         pending = 0
         pending_lock = threading.Lock()
+        failed_list: list[FailedAssetItem] = [] if retry_failed else []
+        failed_list_lock = threading.Lock() if retry_failed else None
         pbar = tqdm(desc="Crawl", unit=" page", file=sys.stderr) if (tqdm and use_progress) else None
 
         def process_one(url: str, depth: int, fetcher: Fetcher) -> list[str]:
@@ -825,6 +971,8 @@ def crawl_parallel(
                         max_image_size=max_image_size,
                         same_domain_for_links=link_filter,
                         asset_workers=min(SAFE_ASSET_WORKERS, workers),
+                        failed_list=failed_list if retry_failed else None,
+                        failed_list_lock=failed_list_lock,
                     )
                 except Exception as e:
                     print(f"Error {url}: {e}", file=sys.stderr)
@@ -890,6 +1038,25 @@ def crawl_parallel(
             futs = [executor.submit(worker) for _ in range(workers)]
             for f in as_completed(futs):
                 f.result()
+        if retry_failed and failed_list:
+            print(f"  Retrying {len(failed_list)} failed asset(s)...", file=sys.stderr)
+            by_domain = _group_failed_by_domain(failed_list, out_dir)
+            for dom, items in by_domain.items():
+                mf_path = manifest_path(out_dir, dom)
+                dom_manifest = load_manifest(mf_path)
+                with Fetcher(
+                    timeout=retry_timeout,
+                    use_browser=use_browser,
+                    flaresolverr_url=flaresolverr_url,
+                ) as retry_fetcher:
+                    succ, still = retry_failed_assets(
+                        items, retry_fetcher, delay, dom_manifest, mf_path,
+                    )
+                    save_manifest(mf_path, dom_manifest)
+                    if succ:
+                        print(f"  Retried {dom}: {succ} succeeded", file=sys.stderr)
+                    if still:
+                        _write_failed_urls(out_dir, dom, still)
         if pbar is not None:
             pbar.close()
         return seen

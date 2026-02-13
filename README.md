@@ -90,6 +90,8 @@ When the scraper receives **HTTP 429 (Too Many Requests)** or a **200 response w
 
 **502/503/504** (Bad Gateway, Service Unavailable, Gateway Timeout) are retried up to 6 times with a 5s base wait so flaky upstream servers (e.g. IIIF image servers) often succeed on retry.
 
+**Failed assets:** If particular images or PDFs time out or fail after retries, the scraper records them and runs a **retry pass** after the main download (longer timeout, sequential). Use `--no-retry-failed` to skip this pass, or `--retry-timeout 120` to set the retry timeout in seconds (default 90). Any URLs that still fail after the retry pass are written to `output/<domain>/failed_urls.txt` (one URL per line) for inspection or manual re-runs.
+
 Sites like Archive-It that return a rate-limit message in the HTML body are handled the same way: wait, retry, and throttle.
 
 ### Iterations and auto timeout (single-page)
