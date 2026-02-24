@@ -2,7 +2,7 @@
 
 import json
 import re
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
@@ -36,6 +36,25 @@ _STANFORD_PURL_RE = re.compile(
     r"purl\.stanford\.edu/([a-z0-9_-]+)",
     re.IGNORECASE,
 )
+# HathiTrust: babel.hathitrust.org/cgi/pt?id=xxx or cgi/imgsrv/...
+_HATHITRUST_PT_RE = re.compile(
+    r"(?:babel\.)?hathitrust\.org/cgi/pt\?id=([^;&\s]+)",
+    re.IGNORECASE,
+)
+_HATHITRUST_IMGSRV_RE = re.compile(
+    r"(https?://(?:babel\.)?hathitrust\.org/cgi/imgsrv/(?:image|thumbnail)\?[^&\s]+)",
+    re.IGNORECASE,
+)
+# EEBO (ProQuest): eebo.proquest.com, search.proquest.com/eebo, eebo.chadwyck.com
+_EEBO_DOMAIN_RE = re.compile(
+    r"(?:eebo\.proquest\.com|search\.proquest\.com|eebo\.chadwyck\.com)",
+    re.IGNORECASE,
+)
+# ECCO (Gale): link.gale.com/apps/ECCO
+_ECCO_DOMAIN_RE = re.compile(
+    r"link\.gale\.com/apps/ECCO",
+    re.IGNORECASE,
+)
 # IIIF Image API URL with size/region (e.g. /full/pct:15/) -> we want full size (full/full; max not supported on all servers)
 _IIIF_IMAGE_API_RE = re.compile(
     r"(https?://[^/]+/digital/iiif/2/[^/]+)/full/[^/]+/\d+/[^/]+\.(jpg|png|webp)",
@@ -54,8 +73,36 @@ _NYPL_IIIF3_RE = re.compile(
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}
 
-# URL path patterns to skip (UI chrome: favicons, social icons, etc.)
-SKIP_IMAGE_PATTERNS = ("/favicon.ico", "/icon_", "icon_facebook", "icon_instagram", "icon_google", "icon_youtube", "icon_pinterest", "icon_twitter", "icon_linkedin")
+# URL path patterns to skip (UI chrome: favicons, banners, logos, social icons, etc.)
+SKIP_IMAGE_PATTERNS = (
+    "/favicon.ico", "/icon_",
+    "icon_facebook", "icon_instagram", "icon_google", "icon_youtube",
+    "icon_pinterest", "icon_twitter", "icon_linkedin",
+    "/banner", "/logo", "/header", "/footer", "/ad", "/promo",
+    "/carousel", "/social", "/share",
+)
+
+# Optional override from CLI: (patterns_tuple, clear_defaults)
+_skip_patterns_config: tuple[tuple[str, ...], bool] | None = None
+
+
+def set_skip_patterns(extra: list[str] | None = None, clear: bool = False) -> None:
+    """Configure skip patterns. extra=patterns to add, clear=True to ignore defaults."""
+    global _skip_patterns_config
+    if extra is not None or clear:
+        base = () if clear else SKIP_IMAGE_PATTERNS
+        added = tuple(extra or [])
+        _skip_patterns_config = (base + added, clear)
+    else:
+        _skip_patterns_config = None
+
+
+def _effective_skip_patterns() -> tuple[str, ...]:
+    """Return patterns to use for should_skip_image_url."""
+    if _skip_patterns_config is not None:
+        return _skip_patterns_config[0]
+    return SKIP_IMAGE_PATTERNS
+
 
 # URL substrings that indicate tracking/analytics pixels (skip to avoid 400s and noise)
 TRACKING_URL_SUBSTRINGS = ("facebook.com/tr", "google-analytics.com", "googletagmanager.com", "doubleclick.net", "scorecardresearch.com")
@@ -72,7 +119,7 @@ IMG_PATH_HINTS = ("/image", "/img", "/photo", "/media", "/thumb", "/icaimage", "
 def should_skip_image_url(url: str) -> bool:
     """True if URL looks like UI chrome (favicon, social icons) or tracking pixels."""
     path = urlparse(url).path.lower()
-    if any(p in path for p in SKIP_IMAGE_PATTERNS):
+    if any(p in path for p in _effective_skip_patterns()):
         return True
     url_lower = url.lower()
     return any(t in url_lower for t in TRACKING_URL_SUBSTRINGS)
@@ -230,6 +277,14 @@ def find_image_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
         if href:
             add_url(href)
 
+    # link[rel="alternate"][type^="image/"] (LOC, etc. - download options: TIFF, JPEG2000, etc.)
+    for link in soup.select('link[rel="alternate"][href]'):
+        type_attr = (link.get("type") or "").strip().lower()
+        if type_attr.startswith("image/"):
+            href = link.get("href")
+            if href and _looks_like_image(href):
+                add_url(href)
+
     # style="background-image: url(...)" or background: url(...)
     for tag in soup.find_all(style=True):
         style = tag.get("style", "")
@@ -302,6 +357,64 @@ def find_nypl_iiif_image_urls(raw_html: str) -> list[str]:
         if full_url not in seen:
             seen.add(full_url)
             urls.append(full_url)
+    return urls
+
+
+def find_hathitrust_imgsrv_urls(raw_html: str, page_url: str) -> list[str]:
+    """
+    Extract HathiTrust imgsrv image URLs from HTML and rewrite to full size.
+    Thumbnail: .../thumbnail?id=X;seq=Y;width=... -> image?id=X;seq=Y;size=100
+    Image: .../image?id=X;seq=Y;size=50 -> image?id=X;seq=Y;size=100 (100% = full)
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add_full(url: str) -> None:
+        # Parse and rewrite to size=100 (full resolution)
+        parsed = urlparse(url)
+        if "hathitrust.org" not in parsed.netloc.lower():
+            return
+        # HathiTrust uses ; as query separator; normalize for parse_qs
+        query = (parsed.query or "").replace(";", "&")
+        qs = parse_qs(query)
+        if "id" not in qs:
+            return
+        vol_id = qs["id"][0]
+        seq = qs.get("seq", ["1"])[0]
+        # Build full-res URL: image?id=X;seq=Y;size=100
+        full_qs = {"id": vol_id, "seq": seq, "size": "100"}
+        new_query = urlencode(full_qs)
+        new_url = urlunparse((
+            parsed.scheme or "https",
+            parsed.netloc,
+            "/cgi/imgsrv/image",
+            "",
+            new_query,
+            "",
+        ))
+        if new_url not in seen:
+            seen.add(new_url)
+            urls.append(new_url)
+
+    for m in _HATHITRUST_IMGSRV_RE.finditer(raw_html):
+        add_full(m.group(1))
+
+    # Also derive from page URL: pt?id=X;seq=Y -> image?id=X;seq=Y;size=100
+    m = _HATHITRUST_PT_RE.search(page_url)
+    if m:
+        vol_id = m.group(1)
+        parsed = urlparse(page_url)
+        # HathiTrust uses ; as query separator; normalize for parse_qs
+        query = (parsed.query or "").replace(";", "&")
+        qs = parse_qs(query)
+        seqs = qs.get("seq", ["1"])
+        for seq in seqs:
+            full_qs = {"id": vol_id, "seq": seq, "size": "100"}
+            full_url = f"https://babel.hathitrust.org/cgi/imgsrv/image?{urlencode(full_qs)}"
+            if full_url not in seen:
+                seen.add(full_url)
+                urls.append(full_url)
+
     return urls
 
 
@@ -520,7 +633,7 @@ def parse_iiif_manifest(manifest_data: dict) -> list[str]:
 def _looks_like_image(url_or_path: str) -> bool:
     """True if URL/path appears to reference an image (extension or path hints)."""
     path = urlparse(url_or_path).path.lower()
-    if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico")):
+    if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico", ".tif", ".tiff", ".jp2")):
         return True
     return any(hint in path for hint in IMG_PATH_HINTS)
 

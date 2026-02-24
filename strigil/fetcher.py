@@ -34,6 +34,11 @@ def _body_indicates_rate_limit(content: bytes) -> bool:
     return any(phrase in lower for phrase in RATE_LIMIT_PHRASES)
 
 
+def _is_iiif_image_url(url: str) -> bool:
+    """True if URL is IIIF Image API (direct image GET, no browser needed)."""
+    return url and "/iiif/" in url.lower() and "/full/" in url
+
+
 def _iiif_alternate_url(url: str) -> str | None:
     """Return an alternate IIIF Image API URL to try on 501, or None."""
     if "/full/full/" in url:
@@ -344,15 +349,17 @@ class Fetcher:
         resp.raise_for_status()
         return resp.content
 
-    def fetch_binary(self, url: str, dest_path: Path, *, timeout: float = 60.0, delay: float = 0) -> bool:
-        """Stream download to dest_path. Returns True on success."""
+    def fetch_binary(self, url: str, dest_path: Path, *, timeout: float | None = None, delay: float = 0) -> bool:
+        """Stream download to dest_path. Returns True on success. Uses self._timeout when timeout is None (min 60s)."""
         self._sleep(delay)
-        if self._use_browser:
+        effective = timeout if timeout is not None else max(self._timeout, 60.0)
+        # IIIF Image API URLs are direct GETs; use httpx even when browser is enabled (avoids Playwright timeout)
+        if self._use_browser and not _is_iiif_image_url(url):
             ctx = self._get_browser_context()
             headers = {"Referer": self._page_url} if self._page_url else {}
             for attempt in range(MAX_RETRIES_5XX):
                 attempt_timeout_ms = min(
-                    timeout * (RETRY_BACKOFF ** attempt) * 1000,
+                    effective * (RETRY_BACKOFF ** attempt) * 1000,
                     MAX_TIMEOUT * 1000,
                 )
                 resp = ctx.request.get(url, timeout=attempt_timeout_ms, headers=headers or None)
@@ -385,7 +392,7 @@ class Fetcher:
                 )
         last_exc: BaseException | None = None
         for attempt in range(MAX_RETRIES_5XX):
-            attempt_timeout = min(timeout * (RETRY_BACKOFF ** attempt), MAX_TIMEOUT)
+            attempt_timeout = min(effective * (RETRY_BACKOFF ** attempt), MAX_TIMEOUT)
             try:
                 client = self._get_client()
                 with client.stream("GET", url, timeout=attempt_timeout) as resp:

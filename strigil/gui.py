@@ -59,8 +59,10 @@ def _size_to_arg(n: int) -> str:
     return str(n)
 
 
-def _image_size_args(small: bool, medium: bool, large: bool) -> list[str]:
+def _image_size_args(small: bool, medium: bool, large: bool, all_images: bool = False) -> list[str]:
     """Return CLI args for --min-image-size/--max-image-size from size checkboxes."""
+    if all_images:
+        return ["--all-images"]
     lows: list[int] = []
     highs: list[int | None] = []
     if small:
@@ -77,8 +79,7 @@ def _image_size_args(small: bool, medium: bool, large: bool) -> list[str]:
     low = min(lows)
     high = None if None in highs else max(h for h in highs if h is not None)
     args: list[str] = []
-    if low > 0:
-        args.extend(["--min-image-size", _size_to_arg(low)])
+    args.extend(["--min-image-size", _size_to_arg(low) if low > 0 else "0"])
     if high is not None:
         args.extend(["--max-image-size", _size_to_arg(high)])
     return args
@@ -203,14 +204,16 @@ def main() -> None:
     ttk.Checkbutton(types_frame, text="Text", variable=type_text_var).pack(side=tk.LEFT, padx=(0, 12))
     ttk.Checkbutton(types_frame, text="Images", variable=type_images_var).pack(side=tk.LEFT)
 
-    size_frame = ttk.LabelFrame(content_frame, text="Image size (include)")
+    size_frame = ttk.LabelFrame(content_frame, text="Image size (archival default: 100 KB min)")
     size_frame.grid(row=8, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
     size_small_var = tk.BooleanVar(value=True)
     size_medium_var = tk.BooleanVar(value=True)
     size_large_var = tk.BooleanVar(value=True)
+    all_images_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(size_frame, text="Small (< 100 KB)", variable=size_small_var).pack(side=tk.LEFT, padx=(0, 12))
     ttk.Checkbutton(size_frame, text="Medium (100 KB – 1 MB)", variable=size_medium_var).pack(side=tk.LEFT, padx=(0, 12))
-    ttk.Checkbutton(size_frame, text="Large (> 1 MB)", variable=size_large_var).pack(side=tk.LEFT)
+    ttk.Checkbutton(size_frame, text="Large (> 1 MB)", variable=size_large_var).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Checkbutton(size_frame, text="All images (no size filter)", variable=all_images_var).pack(side=tk.LEFT)
 
     opts_frame = ttk.Frame(content_frame)
     opts_frame.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
@@ -282,6 +285,14 @@ def main() -> None:
     workers_spin = ttk.Spinbox(row1, from_=1, to=12, width=2, textvariable=workers_var)
     workers_spin.pack(side=tk.LEFT, padx=(4, 0))
 
+    retry_frame = ttk.Frame(content_frame)
+    retry_frame.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
+    retry_failed_var = tk.BooleanVar(value=True)
+    retry_timeout_var = tk.DoubleVar(value=90)
+    ttk.Checkbutton(retry_frame, text="Retry failed assets", variable=retry_failed_var).pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Label(retry_frame, text="Retry timeout (s):").pack(side=tk.LEFT, padx=(8, 4))
+    ttk.Spinbox(retry_frame, from_=30, to=300, increment=15, width=4, textvariable=retry_timeout_var).pack(side=tk.LEFT)
+
     keep_awake_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(
         content_frame,
@@ -290,8 +301,8 @@ def main() -> None:
     ).grid(row=10, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
 
     log_frame = ttk.LabelFrame(content_frame, text="Log")
-    log_frame.grid(row=11, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
-    content_frame.rowconfigure(11, weight=1)
+    log_frame.grid(row=12, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+    content_frame.rowconfigure(12, weight=1)
 
     log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
     log_scroll = ttk.Scrollbar(log_frame)
@@ -416,8 +427,18 @@ def main() -> None:
                 size_small_var.get(),
                 size_medium_var.get(),
                 size_large_var.get(),
+                all_images_var.get(),
             )
         )
+        if not retry_failed_var.get():
+            common_args.append("--no-retry-failed")
+        else:
+            try:
+                rt = int(retry_timeout_var.get())
+                if 30 <= rt <= 300:
+                    common_args.extend(["--retry-timeout", str(rt)])
+            except (ValueError, tk.TclError):
+                pass
         if js_var.get():
             common_args.append("--js")
         if flaresolverr_var.get():

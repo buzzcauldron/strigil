@@ -20,6 +20,7 @@ except ImportError:
     tqdm = None
 
 from strigil._deps import check_required, ensure_optional, optional_hint
+from strigil.extractors import set_skip_patterns
 from strigil.hardware import (
     AGGRESSIVENESS_CHOICES,
     default_workers,
@@ -34,6 +35,7 @@ from strigil.pipeline import (
     crawl_parallel,
     parse_size,
     run_done_script,
+    run_retry_from_file,
     run_single_or_sequential_crawl,
 )
 
@@ -93,7 +95,12 @@ def main() -> None:
         type=str,
         default=None,
         metavar="SIZE",
-        help="Skip images smaller than SIZE (e.g. 50k, 1m). Uses HEAD Content-Length.",
+        help="Skip images smaller than SIZE (default: 100k for archival). Uses HEAD Content-Length.",
+    )
+    parser.add_argument(
+        "--all-images",
+        action="store_true",
+        help="Include all images including thumbnails (disables default --min-image-size 100k).",
     )
     parser.add_argument(
         "--max-image-size",
@@ -188,7 +195,33 @@ def main() -> None:
         action="store_true",
         help="Ignore robots.txt (use only when you have permission).",
     )
+    parser.add_argument(
+        "--skip-pattern",
+        action="append",
+        default=None,
+        metavar="PATTERN",
+        help="Add URL path pattern to skip (e.g. /nav-icon). Repeatable.",
+    )
+    parser.add_argument(
+        "--no-skip-pattern",
+        action="store_true",
+        help="Disable default skip patterns (banners, logos, etc.); only use --skip-pattern if given.",
+    )
+    parser.add_argument(
+        "--retry-from",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Retry URLs from file (e.g. output/domain/failed_urls.txt). One URL per line.",
+    )
     args = parser.parse_args()
+    out_dir = Path(args.out_dir)
+
+    if getattr(args, "no_skip_pattern", False) or getattr(args, "skip_pattern", None):
+        set_skip_patterns(
+            extra=getattr(args, "skip_pattern", None) or [],
+            clear=getattr(args, "no_skip_pattern", False),
+        )
 
     if getattr(args, "hardware", False):
         print(format_hardware(), file=sys.stderr)
@@ -223,25 +256,42 @@ def main() -> None:
     if getattr(args, "human_bypass", False):
         args.js = True  # human bypass requires browser
 
+    retry_from = getattr(args, "retry_from", None)
+    if retry_from is not None:
+        run_retry_from_file(
+            retry_from,
+            out_dir,
+            args.delay,
+            getattr(args, "retry_timeout", 90),
+            use_browser=args.js,
+            flaresolverr_url=getattr(args, "flaresolverr_url", None),
+            headed=getattr(args, "headed", False),
+            human_bypass=getattr(args, "human_bypass", False),
+        )
+        if getattr(args, "done_script", None):
+            run_done_script(args.done_script, out_dir)
+        print("\nDone.", file=sys.stderr)
+        return
+
     if not args.url or not [u for u in args.url if u and str(u).strip()]:
         parser.error("At least one URL is required (or use --hardware to print hardware info).")
 
-    out_dir = Path(args.out_dir)
     limit = args.limit
     types_set = set(args.types) if args.types else None
     min_image_size: int | None = None
     max_image_size: int | None = None
-    for opt, val in (("--min-image-size", args.min_image_size), ("--max-image-size", args.max_image_size)):
-        if not val:
-            continue
+    if not getattr(args, "all_images", False):
+        min_image_size = 100 * 1024  # 100k default for archival
+    if args.min_image_size is not None:
         try:
-            parsed = parse_size(val)
-            if "min" in opt:
-                min_image_size = parsed
-            else:
-                max_image_size = parsed
+            min_image_size = parse_size(args.min_image_size)
         except ValueError as e:
-            parser.error(f"{opt}: {e}")
+            parser.error(f"--min-image-size: {e}")
+    if args.max_image_size is not None:
+        try:
+            max_image_size = parse_size(args.max_image_size)
+        except ValueError as e:
+            parser.error(f"--max-image-size: {e}")
     workers = args.workers if args.workers is not None else default_workers()
     workers = max(1, min(workers, default_workers()))
 

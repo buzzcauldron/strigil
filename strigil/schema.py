@@ -8,7 +8,6 @@ generic HTML) and runs the appropriate extraction strategy to get full-resolutio
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
@@ -16,7 +15,15 @@ from typing import Callable
 from bs4 import BeautifulSoup
 
 from strigil.extractors import (
+    _CONTENTDM_ITEM_RE,
+    _ECCO_DOMAIN_RE,
+    _EEBO_DOMAIN_RE,
+    _HATHITRUST_IMGSRV_RE,
+    _HATHITRUST_PT_RE,
+    _IIIF_IMAGE_API_RE,
+    _NYPL_ITEMS_RE,
     find_contentdm_full_res_urls,
+    find_hathitrust_imgsrv_urls,
     find_image_urls,
     find_iiif_manifest_urls,
     find_nypl_iiif_image_urls,
@@ -25,27 +32,16 @@ from strigil.extractors import (
     should_skip_image_url,
 )
 
-# Detection patterns (mirrored from extractors for schema detection)
-_CONTENTDM_ITEM_RE = re.compile(
-    r"/digital/collection/([^/?#]+)/id/(\d+)",
-    re.IGNORECASE,
-)
-_IIIF_IMAGE_API_RE = re.compile(
-    r"(https?://[^/]+/digital/iiif/2/[^/]+)/full/[^/]+/\d+/[^/]+\.(jpg|png|webp)",
-    re.IGNORECASE,
-)
-_NYPL_ITEMS_RE = re.compile(
-    r"^https?://(?:www\.)?digitalcollections\.nypl\.org/items/[a-f0-9-]{36}",
-    re.IGNORECASE,
-)
-
 
 class ImageSchema(str, Enum):
     """Identifies the image storage schema used by a page."""
 
     CONTENTDM = "contentdm"  # OCLC CONTENTdm IIIF
     NYPL = "nypl"  # NYPL Digital Collections (manifest at api-collections)
+    HATHITRUST = "hathitrust"  # HathiTrust babel/imgsrv
     IIIF_MANIFEST = "iiif_manifest"  # Generic IIIF (manifest in iframe/link)
+    EEBO = "eebo"  # Early English Books Online (ProQuest)
+    ECCO = "ecco"  # Eighteenth Century Collections Online (Gale)
     GENERIC_HTML = "generic_html"  # Standard img, srcset, data-src, etc.
 
 
@@ -82,6 +78,25 @@ def detect_image_schemas(
         elif html_str and _IIIF_IMAGE_API_RE.search(html_str):
             results.append(DetectionResult(ImageSchema.CONTENTDM, 0.8))
             seen.add(ImageSchema.CONTENTDM)
+
+    # HathiTrust: babel.hathitrust.org/cgi/pt or imgsrv URLs in HTML
+    if ImageSchema.HATHITRUST not in seen:
+        if _HATHITRUST_PT_RE.search(url or ""):
+            results.append(DetectionResult(ImageSchema.HATHITRUST, 0.95))
+            seen.add(ImageSchema.HATHITRUST)
+        elif html_str and _HATHITRUST_IMGSRV_RE.search(html_str):
+            results.append(DetectionResult(ImageSchema.HATHITRUST, 0.85))
+            seen.add(ImageSchema.HATHITRUST)
+
+    # EEBO (ProQuest): eebo.proquest.com, search.proquest.com, eebo.chadwyck.com
+    if ImageSchema.EEBO not in seen and _EEBO_DOMAIN_RE.search(url or ""):
+        results.append(DetectionResult(ImageSchema.EEBO, 0.9))
+        seen.add(ImageSchema.EEBO)
+
+    # ECCO (Gale): link.gale.com/apps/ECCO
+    if ImageSchema.ECCO not in seen and _ECCO_DOMAIN_RE.search(url or ""):
+        results.append(DetectionResult(ImageSchema.ECCO, 0.9))
+        seen.add(ImageSchema.ECCO)
 
     # IIIF manifest: manifest URLs found in page (skip if NYPL - we use NYPL path)
     if ImageSchema.IIIF_MANIFEST not in seen and ImageSchema.NYPL not in seen:
@@ -151,6 +166,11 @@ def _extract_generic_html(soup: BeautifulSoup, url: str) -> list[str]:
     return find_image_urls(soup, url)
 
 
+def _extract_hathitrust(url: str, html_str: str) -> list[str]:
+    """Extract image URLs using HathiTrust imgsrv (full-res from thumbnails)."""
+    return find_hathitrust_imgsrv_urls(html_str, url)
+
+
 def collect_image_urls(
     soup: BeautifulSoup,
     url: str,
@@ -171,26 +191,13 @@ def collect_image_urls(
             seen.add(u)
             img_urls.append(u)
 
-    # Skip generic HTML if we have a richer schema that yielded results
-    ran_rich_schema = False
-    rich_results = 0
-
     for detection in detect_image_schemas(url, soup, html_str):
         schema = detection.schema
 
         if schema == ImageSchema.GENERIC_HTML:
-            # Run generic only if no rich schema produced enough, or always as supplement
-            if ran_rich_schema and rich_results >= 3:
-                # Rich schema found plenty; still add generic for any extras (e.g. cover image)
-                for u in _extract_generic_html(soup, url):
-                    add(u)
-            else:
-                for u in _extract_generic_html(soup, url):
-                    add(u)
+            for u in _extract_generic_html(soup, url):
+                add(u)
             continue
-
-        ran_rich_schema = True
-        before = len(img_urls)
 
         if schema == ImageSchema.CONTENTDM:
             for u in _extract_contentdm(url, html_str):
@@ -198,11 +205,15 @@ def collect_image_urls(
         elif schema == ImageSchema.NYPL:
             for u in _extract_nypl(url, html_str, fetch_manifest):
                 add(u)
+        elif schema == ImageSchema.HATHITRUST:
+            for u in _extract_hathitrust(url, html_str):
+                add(u)
         elif schema == ImageSchema.IIIF_MANIFEST:
             for u in _extract_iiif_manifest(soup, url, html_str, fetch_manifest):
                 add(u)
-
-        rich_results += len(img_urls) - before
+        elif schema in (ImageSchema.EEBO, ImageSchema.ECCO):
+            for u in _extract_generic_html(soup, url):
+                add(u)
 
     if limit is not None:
         img_urls = img_urls[:limit]
