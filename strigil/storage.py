@@ -103,12 +103,16 @@ def _path_for_image_base(out_dir: Path, domain: str, url: str, content_type: str
     """Canonical path for an image (no suffix); use for skip-if-exists check."""
     ext = ""
     if content_type:
-        m = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/svg+xml": "svg"}
+        m = {
+            "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif",
+            "image/webp": "webp", "image/svg+xml": "svg",
+            "image/tiff": "tiff", "image/tif": "tif",
+        }
         ext = m.get(content_type, "")
     parsed = urlparse(url)
     path = parsed.path.lower()
     if not ext:
-        for e in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"):
+        for e in (".jpg", ".jpeg", ".tif", ".tiff", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"):
             if path.endswith(e):
                 ext = e.lstrip(".")
                 break

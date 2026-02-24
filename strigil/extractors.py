@@ -71,7 +71,17 @@ _NYPL_IIIF3_RE = re.compile(
     re.IGNORECASE,
 )
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico", ".tif", ".tiff"}
+
+
+def image_format_priority(url: str) -> int:
+    """Return priority for image format (higher = preferred). JPEG/TIFF first, then JP2, then others."""
+    path = urlparse(url).path.lower()
+    if any(path.endswith(ext) for ext in (".jpg", ".jpeg", ".tif", ".tiff")):
+        return 2
+    if path.endswith(".jp2") or path.endswith(".jpx"):
+        return 1
+    return 0
 
 # URL path patterns to skip (UI chrome: favicons, banners, logos, social icons, etc.)
 SKIP_IMAGE_PATTERNS = (
@@ -80,6 +90,7 @@ SKIP_IMAGE_PATTERNS = (
     "icon_pinterest", "icon_twitter", "icon_linkedin",
     "/banner", "/logo", "/header", "/footer", "/ad", "/promo",
     "/carousel", "/social", "/share",
+    "/uhleft", "/uhright", "/whiteborder",  # AALT legal archive UI chrome
 )
 
 # Optional override from CLI: (patterns_tuple, clear_defaults)
@@ -115,6 +126,9 @@ IMG_DATA_ATTRS = (
 # Path segments that suggest an image URL (for extension-less a[href])
 IMG_PATH_HINTS = ("/image", "/img", "/photo", "/media", "/thumb", "/icaimage", "/gallery", "/asset")
 
+# link[rel="alternate"] type priority: JPEG/TIFF first
+_ALTERNATE_TYPE_PRIORITY = ("image/jpeg", "image/jpg", "image/tiff", "image/tif")
+
 
 def should_skip_image_url(url: str) -> bool:
     """True if URL looks like UI chrome (favicon, social icons) or tracking pixels."""
@@ -125,8 +139,37 @@ def should_skip_image_url(url: str) -> bool:
     return any(t in url_lower for t in TRACKING_URL_SUBSTRINGS)
 
 
+# Path extensions that indicate a file (not a directory); if absent, treat as directory for urljoin
+_PATH_FILE_EXTENSIONS = (
+    ".html", ".htm", ".xhtml", ".php", ".asp", ".aspx", ".jsp", ".cgi",
+    ".pdf", ".xml", ".json", ".txt", ".csv", ".rss", ".atom",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".bmp",
+)
+
+
+def _base_for_relative(base_url: str) -> str:
+    """
+    Normalize base_url so relative paths resolve correctly.
+    When the URL looks like a directory (no file extension), ensure trailing slash.
+    E.g. http://aalt.law.uh.edu/E1/CP40no1A -> .../CP40no1A/ so thumbnail_IMG_0595.JPG
+    resolves to .../CP40no1A/thumbnail_IMG_0595.JPG instead of .../E1/thumbnail_IMG_0595.JPG.
+    """
+    if not base_url or base_url.endswith("/"):
+        return base_url
+    parsed = urlparse(base_url)
+    path = parsed.path or "/"
+    last = path.rstrip("/").split("/")[-1] if path else ""
+    if not last:
+        return base_url.rstrip("/") + "/"
+    last_lower = last.lower()
+    if any(last_lower.endswith(ext) for ext in _PATH_FILE_EXTENSIONS):
+        return base_url
+    return base_url.rstrip("/") + "/"
+
+
 def _resolve_urls(base_url: str, seen: set[str], *candidates: str) -> list[str]:
     """Resolve candidate hrefs/srcs to absolute URLs and return new ones (deduped)."""
+    base = _base_for_relative(base_url)
     out: list[str] = []
     for raw in candidates:
         if not raw or not isinstance(raw, str):
@@ -134,7 +177,7 @@ def _resolve_urls(base_url: str, seen: set[str], *candidates: str) -> list[str]:
         raw = raw.strip()
         if not raw or raw.startswith(("#", "mailto:", "javascript:", "data:")):
             continue
-        u = urljoin(base_url, raw)
+        u = urljoin(base, raw)
         if u and u not in seen:
             seen.add(u)
             out.append(u)
@@ -142,6 +185,7 @@ def _resolve_urls(base_url: str, seen: set[str], *candidates: str) -> list[str]:
 
 THUMB_TO_FULL = [
     (r"/thumb(s|nails?)/", "/full/"),
+    (r"thumbnail_", ""),  # AALT: thumbnail_IMG_0595.JPG -> IMG_0595.JPG
     (r"/small/", "/large/"),
     (r"/_s\.", "/_b."),
     (r"-thumb", ""),
@@ -178,6 +222,7 @@ def find_pdf_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
 
 def _parse_srcset(srcset: str, base_url: str) -> list[tuple[str, int]]:
     """Parse srcset attribute; return [(url, width)] with width 0 if descriptor missing."""
+    base = _base_for_relative(base_url)
     entries: list[tuple[str, int]] = []
     for part in srcset.split(","):
         part = part.strip()
@@ -193,16 +238,16 @@ def _parse_srcset(srcset: str, base_url: str) -> list[tuple[str, int]]:
                 except ValueError:
                     pass
                 break
-        abs_url = urljoin(base_url, url)
+        abs_url = urljoin(base, url)
         entries.append((abs_url, width))
     return entries
 
 
 def _pick_largest_srcset(entries: list[tuple[str, int]]) -> str | None:
-    """Return URL with largest width; if none have width, return first."""
+    """Return URL with largest width; if tied, prefer JPEG/TIFF."""
     if not entries:
         return None
-    best = max(entries, key=lambda x: x[1])
+    best = max(entries, key=lambda x: (x[1], image_format_priority(x[0])))
     return best[0]
 
 
@@ -278,12 +323,17 @@ def find_image_urls(soup: BeautifulSoup, base_url: str) -> list[str]:
             add_url(href)
 
     # link[rel="alternate"][type^="image/"] (LOC, etc. - download options: TIFF, JPEG2000, etc.)
-    for link in soup.select('link[rel="alternate"][href]'):
-        type_attr = (link.get("type") or "").strip().lower()
-        if type_attr.startswith("image/"):
-            href = link.get("href")
-            if href and _looks_like_image(href):
-                add_url(href)
+    # Prioritize JPEG/TIFF over JP2/others
+    alternate_links = [
+        (link.get("href"), (link.get("type") or "").strip().lower())
+        for link in soup.select('link[rel="alternate"][href]')
+    ]
+    alternate_links.sort(
+        key=lambda x: next((i for i, t in enumerate(_ALTERNATE_TYPE_PRIORITY) if x[1].startswith(t)), 99)
+    )
+    for href, type_attr in alternate_links:
+        if type_attr.startswith("image/") and href and _looks_like_image(href):
+            add_url(href)
 
     # style="background-image: url(...)" or background: url(...)
     for tag in soup.find_all(style=True):

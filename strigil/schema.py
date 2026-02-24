@@ -28,6 +28,7 @@ from strigil.extractors import (
     find_iiif_manifest_urls,
     find_nypl_iiif_image_urls,
     find_nypl_manifest_urls,
+    image_format_priority,
     parse_iiif_manifest,
     should_skip_image_url,
 )
@@ -215,6 +216,8 @@ def collect_image_urls(
             for u in _extract_generic_html(soup, url):
                 add(u)
 
+    # Prioritize JPEG/TIFF (archival quality) before applying limit
+    img_urls.sort(key=lambda u: -image_format_priority(u))
     if limit is not None:
         img_urls = img_urls[:limit]
     return img_urls
