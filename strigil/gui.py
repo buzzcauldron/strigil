@@ -107,7 +107,7 @@ def main() -> None:
     ensure_optional()
     root = tk.Tk()
     root.title("Strigil")
-    root.minsize(400, 320)
+    root.minsize(480, 360)
 
     main_frame = ttk.Frame(root, padding=10)
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -221,16 +221,16 @@ def main() -> None:
     initial_params = get_aggressiveness_params("auto")
     delay_var = tk.DoubleVar(value=initial_params["delay"])
     workers_var = tk.IntVar(value=initial_params["workers"])
-    # Row 0: delay, aggressiveness, workers, JS, FlareSolverr
-    row0 = ttk.Frame(opts_frame)
-    row0.pack(fill=tk.X, pady=(0, 4))
-    ttk.Label(row0, text="Delay (s):").pack(side=tk.LEFT)
-    delay_spin = ttk.Spinbox(row0, from_=0.25, to=10, increment=0.25, width=5, textvariable=delay_var)
+    # Row 0a: delay, aggressiveness, workers
+    row0a = ttk.Frame(opts_frame)
+    row0a.pack(fill=tk.X, pady=(0, 4))
+    ttk.Label(row0a, text="Delay (s):").pack(side=tk.LEFT)
+    delay_spin = ttk.Spinbox(row0a, from_=0.25, to=10, increment=0.25, width=5, textvariable=delay_var)
     delay_spin.pack(side=tk.LEFT, padx=(4, 12))
-    ttk.Label(row0, text="Aggressiveness:").pack(side=tk.LEFT, padx=(8, 4))
+    ttk.Label(row0a, text="Aggressiveness:").pack(side=tk.LEFT, padx=(8, 4))
     agg_var = tk.StringVar(value="auto")
     agg_combo = ttk.Combobox(
-        row0,
+        row0a,
         textvariable=agg_var,
         values=("auto", "conservative", "balanced", "aggressive"),
         state="readonly",
@@ -250,23 +250,30 @@ def main() -> None:
     agg_var.trace_add("write", on_aggressiveness_change)
     agg_combo.set(f"auto ({suggested})")
 
+    ttk.Label(row0a, text="Workers:").pack(side=tk.LEFT, padx=(8, 0))
+    workers_spin = ttk.Spinbox(row0a, from_=1, to=12, width=2, textvariable=workers_var)
+    workers_spin.pack(side=tk.LEFT, padx=(4, 0))
+
+    # Row 0b: Use JS, FlareSolverr
+    row0b = ttk.Frame(opts_frame)
+    row0b.pack(fill=tk.X, pady=(0, 4))
     js_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(
-        row0,
+        row0b,
         text="Use JavaScript (needed for NYPL, etc.)",
         variable=js_var,
-    ).pack(side=tk.LEFT, padx=(8, 8))
+    ).pack(side=tk.LEFT, padx=(0, 8))
     flaresolverr_var = tk.BooleanVar(value=False)
     flaresolverr_url_var = tk.StringVar(value="")
     ttk.Checkbutton(
-        row0,
+        row0b,
         text="FlareSolverr (Cloudflare bypass)",
         variable=flaresolverr_var,
     ).pack(side=tk.LEFT, padx=(0, 4))
-    ttk.Label(row0, text="URL:").pack(side=tk.LEFT, padx=(0, 2))
-    flaresolverr_entry = ttk.Entry(row0, textvariable=flaresolverr_url_var, width=22)
+    ttk.Label(row0b, text="URL:").pack(side=tk.LEFT, padx=(0, 2))
+    flaresolverr_entry = ttk.Entry(row0b, textvariable=flaresolverr_url_var, width=22)
     flaresolverr_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-    # Row 1: crawl, depth, same domain, workers
+    # Row 1: crawl, depth, same domain
     row1 = ttk.Frame(opts_frame)
     row1.pack(fill=tk.X)
     crawl_var = tk.BooleanVar(value=True)
@@ -281,12 +288,9 @@ def main() -> None:
     depth_spin.pack(side=tk.LEFT, padx=(4, 8))
     same_domain_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(row1, text="Same domain only", variable=same_domain_var).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Label(row1, text="Workers:").pack(side=tk.LEFT, padx=(8, 0))
-    workers_spin = ttk.Spinbox(row1, from_=1, to=12, width=2, textvariable=workers_var)
-    workers_spin.pack(side=tk.LEFT, padx=(4, 0))
 
     retry_frame = ttk.Frame(content_frame)
-    retry_frame.grid(row=9, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
+    retry_frame.grid(row=11, column=0, columnspan=2, sticky=tk.EW, pady=(0, 4))
     retry_failed_var = tk.BooleanVar(value=True)
     retry_timeout_var = tk.DoubleVar(value=90)
     ttk.Checkbutton(retry_frame, text="Retry failed assets", variable=retry_failed_var).pack(side=tk.LEFT, padx=(0, 8))
@@ -298,11 +302,11 @@ def main() -> None:
         content_frame,
         text="Keep system awake (for long scrapes)",
         variable=keep_awake_var,
-    ).grid(row=10, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+    ).grid(row=12, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
 
     log_frame = ttk.LabelFrame(content_frame, text="Log")
-    log_frame.grid(row=12, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
-    content_frame.rowconfigure(12, weight=1)
+    log_frame.grid(row=13, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+    content_frame.rowconfigure(13, weight=1)
 
     log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
     log_scroll = ttk.Scrollbar(log_frame)

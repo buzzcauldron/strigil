@@ -1,0 +1,16 @@
+{
+  "extends": ["config:recommended"],
+  "versioning": "semver",
+  "prTitle": "{{#if newVersion}}[{{newVersion}}] {{/if}}{{{commitMessagePrefix}}} {{{commitMessageAction}}} {{{commitMessageTopic}}} {{{commitMessageExtra}}} {{{commitMessageSuffix}}}",
+  "docker": {
+    "pinDigests": true
+  },
+  "packageRules": [
+    {
+      "description": "Group FlareSolverr updates",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/flaresolverr/flaresolverr"],
+      "groupName": "FlareSolverr"
+    }
+  ]
+}

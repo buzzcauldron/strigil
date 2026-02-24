@@ -10,6 +10,9 @@ import httpx
 # Phrases that indicate a rate-limit page (200 body) so we throttle and retry
 RATE_LIMIT_PHRASES = (b"rate limit", b"too many requests", b"throttl", b"slow down", b"try again")
 
+# Phrases that indicate a Cloudflare challenge page (200 or 403 body)
+CLOUDFLARE_PHRASES = (b"Just a moment", b"_cf_chl_opt", b"challenge-platform", b"cf-browser-verification")
+
 def _parse_retry_after(value: str | None) -> float | None:
     """Parse Retry-After header; return seconds to wait, or None."""
     if not value or not value.strip():
@@ -32,6 +35,26 @@ def _body_indicates_rate_limit(content: bytes) -> bool:
         return False
     lower = content.lower()
     return any(phrase in lower for phrase in RATE_LIMIT_PHRASES)
+
+
+def _body_indicates_cloudflare(content: bytes) -> bool:
+    """True if response body looks like a Cloudflare challenge page."""
+    if not content or len(content) > 500_000:
+        return False
+    return any(phrase in content for phrase in CLOUDFLARE_PHRASES)
+
+
+def _try_flaresolverr(url: str, timeout_ms: int, msg: str = "Cloudflare detected; retrying via FlareSolverr...") -> tuple[bytes, str] | None:
+    """Fetch via FlareSolverr if available. Returns (bytes, charset) or None on failure."""
+    from strigil.flaresolverr import DEFAULT_FLARESOLVERR_URL, fetch_html as _fetch, get_flaresolverr_url
+    fs_url = get_flaresolverr_url() or DEFAULT_FLARESOLVERR_URL
+    if not fs_url:
+        return None
+    try:
+        print(f"  {msg}", file=sys.stderr)
+        return _fetch(url, fs_url, timeout_ms=timeout_ms)
+    except Exception:
+        return None
 
 
 def _is_iiif_image_url(url: str) -> bool:
@@ -246,6 +269,14 @@ class Fetcher:
                     html = page.content()
                     # Cloudflare challenge: "Just a moment..." page
                     if "Just a moment" in html or "_cf_chl_opt" in html or "challenge-platform" in html:
+                        if not self._flaresolverr_url:
+                            result = _try_flaresolverr(
+                                url,
+                                min(int(attempt_timeout_ms), int(MAX_TIMEOUT * 1000)),
+                                msg="Cloudflare challenge detected; retrying via FlareSolverr...",
+                            )
+                            if result is not None:
+                                return result
                         if self._human_bypass:
                             print(
                                 "\nCloudflare challenge detected. Solve it in the browser window, "
@@ -271,6 +302,7 @@ class Fetcher:
                     page.close()
         self._sleep(delay)
         last_exc = None
+        tried_flaresolverr = False
         for attempt in range(MAX_RETRIES_5XX):
             attempt_timeout = min(
                 self._timeout * (RETRY_BACKOFF ** attempt),
@@ -279,6 +311,25 @@ class Fetcher:
             try:
                 client = self._get_client()
                 resp = client.get(url, timeout=attempt_timeout)
+                # Auto-engage FlareSolverr on Cloudflare (403 or challenge page)
+                if not self._flaresolverr_url and not tried_flaresolverr:
+                    is_cloudflare = (
+                        resp.status_code == 403
+                        or (resp.status_code == 200 and _body_indicates_cloudflare(resp.content))
+                    )
+                    if is_cloudflare:
+                        result = _try_flaresolverr(
+                            url, min(int(attempt_timeout * 1000), int(MAX_TIMEOUT * 1000))
+                        )
+                        if result is not None:
+                            tried_flaresolverr = True
+                            return result
+                        # FlareSolverr failed; retry or raise (don't return challenge page)
+                        if resp.status_code == 200:
+                            if attempt < MAX_RETRIES_5XX - 1:
+                                _polite_sleep(RETRY_BACKOFF ** attempt)
+                                continue
+                            raise RuntimeError("Cloudflare challenge; FlareSolverr unavailable or failed")
                 resp.raise_for_status()
                 # Some sites return 200 with a rate-limit message in the body
                 if _body_indicates_rate_limit(resp.content):
@@ -296,6 +347,15 @@ class Fetcher:
                 r = getattr(e, "response", None)
                 if r is not None:
                     code = getattr(r, "status_code", None)
+                    # Auto-engage FlareSolverr on 403 before normal retry
+                    if code == 403 and not self._flaresolverr_url and not tried_flaresolverr:
+                        result = _try_flaresolverr(
+                            url, min(int(attempt_timeout * 1000), int(MAX_TIMEOUT * 1000)),
+                            msg="Cloudflare (403) detected; retrying via FlareSolverr...",
+                        )
+                        if result is not None:
+                            tried_flaresolverr = True
+                            return result
                     max_attempts = MAX_RETRIES_5XX if _is_retryable_5xx(code) else MAX_RETRIES
                     retryable = code in (403, 429, 500, 502, 503, 504) and attempt < max_attempts - 1
                     if retryable:

@@ -74,14 +74,17 @@ Some sites use **Cloudflare**, **DDoS-GUARD**, or similar protection and may ret
 
 This scraper can fetch HTML via **[FlareSolverr](https://github.com/FlareSolverr/FlareSolverr)** so Cloudflare-protected pages are solved by FlareSolverr’s headless browser and the cleared HTML is used for link and image discovery.
 
-1. Run FlareSolverr (e.g. Docker): `docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest`
+1. Run FlareSolverr (e.g. Docker):
+   - **Docker Compose (recommended):** `docker compose up -d flaresolverr` — uses pinned version from `docker-compose.yml`; run `docker compose pull flaresolverr && docker compose up -d flaresolverr` to update. [Renovate](https://docs.renovatebot.com/) will open PRs when new FlareSolverr versions are released.
+   - **Plain Docker:** `docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest`
 2. Enable it when scraping:
-   - **CLI:** `strigil --url https://... --flaresolverr` (uses `http://localhost:8191` or `FLARESOLVERR_URL`)
+   - **Auto-engage:** If FlareSolverr is running at `http://localhost:8191` (or `FLARESOLVERR_URL`), the scraper **automatically** retries via FlareSolverr when it detects Cloudflare (403 or challenge page). No flag needed.
+   - **CLI (explicit):** `strigil --url https://... --flaresolverr` (uses `http://localhost:8191` or `FLARESOLVERR_URL`)
    - **CLI with custom URL:** `strigil --url https://... --flaresolverr http://host:8191`
    - **Env:** set `FLARESOLVERR_URL=http://localhost:8191` and pass `--flaresolverr`
    - **GUI:** check “FlareSolverr (Cloudflare bypass)” and optionally set the FlareSolverr API URL.
 
-When `--flaresolverr` is set, page HTML is requested through FlareSolverr; asset downloads (images, PDFs) still use the normal fetcher. With crawl, the scraper uses one worker when FlareSolverr is enabled (same as with `--js`).
+When FlareSolverr is used (auto or explicit), page HTML is requested through it; asset downloads (images, PDFs) still use the normal fetcher. With crawl, the scraper uses one worker when FlareSolverr is enabled (same as with `--js`).
 
 - **FlareSolverr:** [https://github.com/FlareSolverr/FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) — proxy server to bypass Cloudflare and DDoS-GUARD protection (MIT license).
 
