@@ -36,6 +36,11 @@ _STANFORD_PURL_RE = re.compile(
     r"purl\.stanford\.edu/([a-z0-9_-]+)",
     re.IGNORECASE,
 )
+# Wellcome Collection: wellcomecollection.org/works/{id} -> Catalogue API + IIIF manifest
+_WELLCOME_WORKS_RE = re.compile(
+    r"wellcomecollection\.org/works/([a-z0-9_-]+)",
+    re.IGNORECASE,
+)
 # HathiTrust: babel.hathitrust.org/cgi/pt?id=xxx or cgi/imgsrv/...
 _HATHITRUST_PT_RE = re.compile(
     r"(?:babel\.)?hathitrust\.org/cgi/pt\?id=([^;&\s]+)",
@@ -128,6 +133,31 @@ IMG_PATH_HINTS = ("/image", "/img", "/photo", "/media", "/thumb", "/icaimage", "
 
 # link[rel="alternate"] type priority: JPEG/TIFF first
 _ALTERNATE_TYPE_PRIORITY = ("image/jpeg", "image/jpg", "image/tiff", "image/tif")
+
+
+def infer_expected_images(html_str: str) -> int | None:
+    """
+    Parse common patterns in HTML to infer expected image count.
+    Returns the inferred count or None if no pattern matches.
+    """
+    if not html_str or not isinstance(html_str, str):
+        return None
+    # "Contains: N images" (e.g. Wellcome Collection)
+    m = re.search(r"Contains:\s*(\d+)\s+images?", html_str, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    # "X/Y" pagination (e.g. "1/58" - use second number as total; skip date-like YYYY/MM, MM/DD)
+    m = re.search(r"\b(\d+)/(\d+)\b", html_str)
+    if m:
+        first, second = int(m.group(1)), int(m.group(2))
+        # Skip dates: YYYY/MM (first >= 1000) or MM/DD (first <= 12, second <= 31, first != 1)
+        if first < 1000 and (first > 12 or second > 31 or first == 1):
+            return second
+    # "X of Y" (e.g. "Page 1 of 58")
+    m = re.search(r"(\d+)\s+of\s+(\d+)\b", html_str, re.IGNORECASE)
+    if m:
+        return int(m.group(2))
+    return None
 
 
 def should_skip_image_url(url: str) -> bool:

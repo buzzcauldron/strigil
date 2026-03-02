@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "strigil"
-version = "0.4.0"
+version = "0.5.0"
 description = "Strigil: PDFs, text, and images from websites at high quality, stored locally."
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,6 +22,8 @@ dependencies = [
 readability = ["readability-lxml"]
 bundle = ["pyinstaller>=6.0"]
 progress = ["tqdm"]
+release = ["python-semantic-release"]
+
 
 [project.urls]
 Homepage = "https://github.com/sethstrickland/strigil"
@@ -34,3 +36,7 @@ strigil-gui = "strigil.gui:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["strigil*"]
+
+[tool.semantic_release]
+branch = "main"
+build_command = "pip install -e ."

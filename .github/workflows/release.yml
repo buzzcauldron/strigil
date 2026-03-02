@@ -1,0 +1,29 @@
+# Release: bump version from conventional commits, create tag, and GitHub Release.
+# Trigger: push to main (semantic-release skips if no version bump needed), or manual.
+# Requires: conventional commits (feat:, fix:, BREAKING CHANGE:) for auto-bump.
+name: Release
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Bump and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install semantic-release
+        run: pip install python-semantic-release
+      - name: Run semantic-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: semantic-release publish

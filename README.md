@@ -34,7 +34,9 @@ strigil-gui
 
 Use `--js` for JS-heavy pages (e.g. NYPL Digital Collections). Playwright and Chromium are installed automatically with the package; on first `--js` use, Chromium is downloaded if needed.
 
-**Supported archival sources:** NYPL Digital Collections, CONTENTdm, IIIF manifests, HathiTrust (babel.hathitrust.org), EEBO (ProQuest), ECCO (Gale), Internet Archive, Stanford PURL, Digital Bodleian, Library of Congress.
+**Supported archival sources:** NYPL Digital Collections, CONTENTdm, IIIF manifests, HathiTrust (babel.hathitrust.org), EEBO (ProQuest), ECCO (Gale), Internet Archive (full IIIF + metadata API fallback), Wellcome Collection (Catalogue API → IIIF manifest), Stanford PURL, Digital Bodleian, Library of Congress.
+
+**Discovery hints:** Use `--expected-images N` when a page should have ~N images (triggers fallbacks if fewer found). Use `--source ADAPTER` to force a specific adapter (e.g. `wellcome`, `archive_org`) when auto-detection fails.
 
 Optional: install tqdm for a progress bar (per-page in crawl, per-asset on single page):
 
@@ -171,3 +173,8 @@ On push/PR to `main` or `master`, GitHub Actions:
 - Builds the **Docker** image and runs a quick smoke test.
 
 See [.github/workflows/build.yml](.github/workflows/build.yml).
+
+### Version and release
+
+- **Version check**: `python scripts/check_version.py` verifies pyproject.toml matches CHANGELOG (run before release).
+- **Auto-release**: [python-semantic-release](https://python-semantic-release.readthedocs.io/) is configured. Use conventional commits (`feat:`, `fix:`, `BREAKING CHANGE:`) for automatic version bumps on push to main.

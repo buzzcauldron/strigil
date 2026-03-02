@@ -9,7 +9,7 @@ from typing import Callable
 
 from bs4 import BeautifulSoup
 
-from strigil.schema import collect_image_urls as _collect_image_urls
+from strigil.schema import DiscoveryContext, collect_image_urls as _collect_image_urls
 
 
 def collect_image_urls(
@@ -19,6 +19,7 @@ def collect_image_urls(
     *,
     fetch_manifest: Callable[[str], bytes] | None = None,
     limit: int | None = None,
+    context: DiscoveryContext | None = None,
 ) -> list[str]:
     """
     Detect image storage schema and collect image URLs using the proper strategy.
@@ -30,4 +31,5 @@ def collect_image_urls(
         html_str,
         fetch_manifest=fetch_manifest,
         limit=limit,
+        context=context,
     )

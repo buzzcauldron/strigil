@@ -22,6 +22,7 @@ except ImportError:
     tqdm = None
 
 from strigil.discovery import collect_image_urls
+from strigil.schema import DiscoveryContext
 from strigil.extractors import (
     find_page_links,
     find_pdf_urls,
@@ -167,6 +168,7 @@ def map_page(
     head_workers: int = 4,
     same_domain: str | None = None,
     use_browser: bool = False,
+    discovery_context: DiscoveryContext | None = None,
 ) -> MapResult:
     """
     Map a page: fetch HTML, parse URLs, HEAD images for size filter. No downloads.
@@ -197,7 +199,12 @@ def map_page(
                 with Fetcher(use_browser=False) as f:
                     return f.fetch_html(u, delay=0)[0]
             return fetcher.fetch_html(u, delay=delay)[0]
-        img_urls = collect_image_urls(soup, url, html_str, fetch_manifest=fetch_manifest, limit=limit_images)
+        img_urls = collect_image_urls(
+            soup, url, html_str,
+            fetch_manifest=fetch_manifest,
+            limit=limit_images,
+            context=discovery_context,
+        )
 
         need_size_filter = min_image_size is not None or max_image_size is not None
         seen_best_urls: set[str] = set()
@@ -404,6 +411,7 @@ def scrape_page(
     asset_workers: int = 1,
     failed_list: list | None = None,
     failed_list_lock: threading.Lock | None = None,
+    discovery_context: DiscoveryContext | None = None,
 ) -> list[str]:
     """
     Scrape a single page: PDFs, text, images (according to types).
@@ -461,7 +469,12 @@ def scrape_page(
     seen_best_urls: set[str] = set()
     if "images" in want:
         fetch_manifest = lambda u: fetcher.fetch_bytes(u, delay=delay)
-        for img_url in collect_image_urls(soup, url, html_str, fetch_manifest=fetch_manifest, limit=None):
+        for img_url in collect_image_urls(
+            soup, url, html_str,
+            fetch_manifest=fetch_manifest,
+            limit=None,
+            context=discovery_context,
+        ):
             if limit_images is not None and len(image_work) >= limit_images:
                 break
             if img_url in urls_map:
@@ -819,6 +832,11 @@ def run_single_or_sequential_crawl(
                     domain = sanitize_domain(url)
                     manifest = load_manifest(manifest_path(out_dir, domain))
                     try:
+                        discovery_ctx = DiscoveryContext(
+                            url=url,
+                            expected_images=getattr(args, "expected_images", None),
+                            source_hint=getattr(args, "source", None),
+                        )
                         links = scrape_page(
                             url, out_dir, args.delay, manifest, fetcher,
                             limit, limit, collect_links=True, types=types_set,
@@ -827,6 +845,7 @@ def run_single_or_sequential_crawl(
                             max_image_size=max_image_size,
                             same_domain_for_links=link_filter,
                             failed_list=failed_list if retry_failed else None,
+                            discovery_context=discovery_ctx,
                         )
                         if use_progress:
                             pbar.set_postfix(queue=len(q))
@@ -912,6 +931,11 @@ def run_single_or_sequential_crawl(
                         want = types_set or VALID_TYPES
                         if getattr(args, "map_first", True):
                             print("  → Fetching and mapping page...", file=sys.stderr)
+                            discovery_ctx = DiscoveryContext(
+                                url=args.url,
+                                expected_images=getattr(args, "expected_images", None),
+                                source_hint=getattr(args, "source", None),
+                            )
                             map_result = map_page(
                                 args.url,
                                 iter_fetcher,
@@ -921,6 +945,7 @@ def run_single_or_sequential_crawl(
                                 delay_i,
                                 head_workers=min(SAFE_HEAD_WORKERS, workers),
                                 use_browser=use_browser,
+                                discovery_context=discovery_ctx,
                             )
                             fetcher_ctx = (
                                 (lambda f: lambda: nullcontext(f))(iter_fetcher)
@@ -959,6 +984,11 @@ def run_single_or_sequential_crawl(
                             save_manifest(manifest_path(out_dir, domain), manifest)
                         else:
                             print("  → Fetching and extracting page...", file=sys.stderr)
+                            discovery_ctx = DiscoveryContext(
+                                url=args.url,
+                                expected_images=getattr(args, "expected_images", None),
+                                source_hint=getattr(args, "source", None),
+                            )
                             scrape_page(
                                 args.url, out_dir, delay_i, manifest, iter_fetcher,
                                 limit, limit, collect_links=False, types=types_set,
@@ -966,6 +996,7 @@ def run_single_or_sequential_crawl(
                                 min_image_size=min_image_size,
                                 max_image_size=max_image_size,
                                 failed_list=failed_list_sp if retry_failed else None,
+                                discovery_context=discovery_ctx,
                             )
                             if retry_failed and failed_list_sp:
                                 print(f"  Retrying {len(failed_list_sp)} failed asset(s)...", file=sys.stderr)
@@ -1011,6 +1042,8 @@ def crawl_parallel(
     no_robots: bool = False,
     headed: bool = False,
     human_bypass: bool = False,
+    expected_images: int | None = None,
+    source_hint: str | None = None,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -1037,6 +1070,11 @@ def crawl_parallel(
             with manifest_lock:
                 manifest = load_manifest(manifest_path(out_dir, domain))
                 try:
+                    discovery_ctx = DiscoveryContext(
+                        url=url,
+                        expected_images=expected_images,
+                        source_hint=source_hint,
+                    )
                     links = scrape_page(
                         url, out_dir, delay, manifest, fetcher,
                         limit, limit, collect_links=True, types=types_set,
@@ -1047,6 +1085,7 @@ def crawl_parallel(
                         asset_workers=min(SAFE_ASSET_WORKERS, workers),
                         failed_list=failed_list if retry_failed else None,
                         failed_list_lock=failed_list_lock,
+                        discovery_context=discovery_ctx,
                     )
                 except Exception as e:
                     print(f"Error {url}: {e}", file=sys.stderr)

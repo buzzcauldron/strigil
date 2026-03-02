@@ -11,6 +11,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
+from strigil import __version__
 from strigil._deps import check_required, ensure_optional
 from strigil.hardware import (
     default_workers,
@@ -106,7 +107,7 @@ def main() -> None:
     check_required()
     ensure_optional()
     root = tk.Tk()
-    root.title("Strigil")
+    root.title(f"Strigil {__version__}")
     root.minsize(480, 360)
 
     main_frame = ttk.Frame(root, padding=10)
@@ -297,6 +298,24 @@ def main() -> None:
     ttk.Label(retry_frame, text="Retry timeout (s):").pack(side=tk.LEFT, padx=(8, 4))
     ttk.Spinbox(retry_frame, from_=30, to=300, increment=15, width=4, textvariable=retry_timeout_var).pack(side=tk.LEFT)
 
+    # Advanced: expected images / source hint (for archive.org, Wellcome, etc.)
+    advanced_frame = ttk.Frame(content_frame)
+    advanced_frame.grid(row=10, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+    ttk.Label(advanced_frame, text="Expected images (hint):").pack(side=tk.LEFT, padx=(0, 4))
+    expected_images_var = tk.StringVar(value="")
+    ttk.Entry(advanced_frame, textvariable=expected_images_var, width=6).pack(side=tk.LEFT, padx=(0, 12))
+    ttk.Label(advanced_frame, text="Source adapter:").pack(side=tk.LEFT, padx=(0, 4))
+    source_var = tk.StringVar(value="")
+    source_combo = ttk.Combobox(
+        advanced_frame,
+        textvariable=source_var,
+        values=("", "wellcome", "archive_org", "internet_archive"),
+        state="readonly",
+        width=14,
+    )
+    source_combo.pack(side=tk.LEFT, padx=(0, 4))
+    source_combo.set("")
+
     keep_awake_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(
         content_frame,
@@ -459,6 +478,15 @@ def main() -> None:
                 common_args.append("--same-domain-only")
         if keep_awake_var.get():
             common_args.append("--keep-awake")
+        try:
+            exp = expected_images_var.get().strip()
+            if exp and exp.isdigit() and int(exp) > 0:
+                common_args.extend(["--expected-images", exp])
+        except (ValueError, tk.TclError):
+            pass
+        src = source_var.get().strip()
+        if src:
+            common_args.extend(["--source", src])
 
         done_script = done_script_var.get().strip()
         out_dir = out_var.get().strip() or "output"

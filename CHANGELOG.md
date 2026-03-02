@@ -7,18 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Added
-- **502/503/504 retries**: Fetcher retries transient server errors (502 Bad Gateway, etc.) up to 6 times with 5s base wait (browser and httpx paths). Reduces failures on flaky IIIF/library servers.
-- **Failed-asset retry**: Failed image/PDF URLs (timeouts or after fetcher retries) are collected and retried in a second pass with longer timeout (default 90s) and sequential downloads. `--no-retry-failed` disables this; `--retry-timeout SECS` sets the retry timeout. Still-failed URLs are written to `output/<domain>/failed_urls.txt` and file names to `errata`.
-- **Archival mode (default)**: Default `--min-image-size 100k`; skips GIFs when filtering; deduplicates thumbnail/full-size; skips banners, logos, social icons. Use `--all-images` to include all images.
-- **HathiTrust, EEBO, ECCO**: Schema detection and extraction for HathiTrust (babel/imgsrv), EEBO (ProQuest), ECCO (Gale). Full-res from HathiTrust thumbnails.
-- **IIIF via httpx when --js**: IIIF Image API URLs use httpx (not Playwright) even with `--js`, avoiding 60s Playwright timeout on large images.
-- **Configurable skip patterns**: `--skip-pattern PATTERN` (repeatable) to add URL path patterns to skip; `--no-skip-pattern` to disable defaults.
-- **Retry from file**: `--retry-from FILE` to retry URLs from `failed_urls.txt` (or similar). One URL per line.
-- **GUI**: Retry options (checkbox, timeout), "All images" checkbox, archival mode label.
+- (Reserved for future changes.)
+
+## [0.5.0] - 2025-03-02
+
+### Added
+- **Internet Archive fix**: archive.org/details URLs now yield all images (e.g. 364 for Byrhtferth manuscript) via derived IIIF manifest. Previously only 1 thumbnail was found because manifest logic was never invoked.
+- **archive.org metadata API fallback** (`strigil/archive_org.py`): When IIIF manifest fails, fetches image list from `archive.org/metadata/{id}` and constructs download URLs.
+- **Wellcome Collection adapter** (`strigil/adapters/wellcome.py`): Uses Catalogue API to fetch IIIF manifest URL, then parses manifest for all canvases (e.g. 58 images for Computistical miscellany).
+- **Extensible archive adapter architecture** (`strigil/adapters/`): Protocol-based adapters for archive-specific extraction; register new adapters without modifying core schema.
+- **Discovery context and user hints**: `--expected-images N` hints that the page should have ~N images (triggers fallbacks if fewer found); `--source ADAPTER` forces a specific adapter (e.g. `wellcome`, `archive_org`).
+- **Fallback strategy chain**: When results fall short of expectations (user or inferred), tries adapter-based extraction.
+- **HTML heuristics** (`infer_expected_images`): Parses "Contains: N images", "X/Y" pagination, "X of Y" to infer expected count and trigger fallbacks automatically.
 
 ### Changed
-- **Higher timeout for --js**: Browser mode uses `--retry-timeout` (default 90s) for initial downloads, reducing IIIF timeouts.
-- **GUI**: Responsive layout—buttons/checkboxes reflow with window; options split into two rows; single command build (`common_args` + `build_cmd`); `set_progress` helper; one `run_done_script_async`.
+- Schema detection now merges derived IIIF manifest URLs (archive.org, Bodleian, Stanford PURL) with HTML-found manifests.
+- Added ARCHIVE_ORG and WELLCOME to ImageSchema enum.
 
 ## [0.4.0] - 2025-02-06
 

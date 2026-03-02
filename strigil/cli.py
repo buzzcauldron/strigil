@@ -214,6 +214,20 @@ def main() -> None:
         metavar="FILE",
         help="Retry URLs from file (e.g. output/domain/failed_urls.txt). One URL per line.",
     )
+    parser.add_argument(
+        "--expected-images",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Hint that the page should have ~N images; triggers fallbacks if we find far fewer.",
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        metavar="ADAPTER",
+        help="Force a specific adapter (e.g. wellcome, archive_org) when auto-detection fails.",
+    )
     args = parser.parse_args()
     out_dir = Path(args.out_dir)
 
@@ -321,6 +335,8 @@ def main() -> None:
                     no_robots=getattr(args, "no_robots", False),
                     headed=getattr(args, "headed", False),
                     human_bypass=getattr(args, "human_bypass", False),
+                    expected_images=getattr(args, "expected_images", None),
+                    source_hint=getattr(args, "source", None),
                 )
             else:
                 eff_workers = 1 if (args.crawl and args.js) else workers
