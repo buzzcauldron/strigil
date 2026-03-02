@@ -60,6 +60,10 @@ class DetectionResult:
     confidence: float
 
 
+# Fallback threshold: try adapter when found < expected * FALLBACK_SHORTFALL_RATIO
+FALLBACK_SHORTFALL_RATIO = 0.5
+
+
 @dataclass
 class DiscoveryContext:
     """Optional hints for image discovery and fallback strategies."""
@@ -298,7 +302,7 @@ def collect_image_urls(
 
     # Fallback: when expected_images (user or inferred) suggests we should have more, try adapters
     expected = ctx.expected_images or infer_expected_images(html_str or "")
-    if expected and len(img_urls) < expected * 0.5:
+    if expected and len(img_urls) < expected * FALLBACK_SHORTFALL_RATIO:
         from strigil.adapters import ALL_ADAPTERS
 
         for adapter in ALL_ADAPTERS:

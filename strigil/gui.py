@@ -9,15 +9,18 @@ import threading
 from pathlib import Path
 
 import tkinter as tk
+from tkinter import messagebox
 from tkinter import ttk
 
 from strigil import __version__
 from strigil._deps import check_required, ensure_optional
-from strigil.hardware import (
-    default_workers,
-    get_aggressiveness_params,
-    suggest_aggressiveness,
-)
+from strigil.discovery import collect_image_urls
+from strigil.extractors import infer_expected_images
+from strigil.fetcher import Fetcher
+from strigil.hardware import get_aggressiveness_params, suggest_aggressiveness
+from strigil.schema import DiscoveryContext, FALLBACK_SHORTFALL_RATIO
+
+from bs4 import BeautifulSoup
 
 LAST_URLS_FILE = Path.home() / ".strigil" / "last_urls.txt"
 
@@ -301,6 +304,12 @@ def main() -> None:
     # Advanced: expected images / source hint (for archive.org, Wellcome, etc.)
     advanced_frame = ttk.Frame(content_frame)
     advanced_frame.grid(row=10, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+    verify_images_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(
+        advanced_frame,
+        text="Verify image count before download",
+        variable=verify_images_var,
+    ).pack(side=tk.LEFT, padx=(0, 12))
     ttk.Label(advanced_frame, text="Expected images (hint):").pack(side=tk.LEFT, padx=(0, 4))
     expected_images_var = tk.StringVar(value="")
     ttk.Entry(advanced_frame, textvariable=expected_images_var, width=6).pack(side=tk.LEFT, padx=(0, 12))
@@ -380,8 +389,19 @@ def main() -> None:
             append_log("Error: At least one URL is required.\n")
             return
         _save_last_urls(url_text.get("1.0", tk.END))
+        selected_types = []
+        if type_pdf_var.get():
+            selected_types.append("pdf")
+        if type_text_var.get():
+            selected_types.append("text")
+        if type_images_var.get():
+            selected_types.append("images")
+        if not selected_types:
+            append_log("Error: Select at least one file type.\n")
+            scrape_btn_ref.config(state=tk.NORMAL)
+            return
         scrape_btn_ref.config(state=tk.DISABLED)
-        state_var.set("Running")
+        state_var.set("Checking image count…" if "images" in selected_types else "Running")
         progress_var.set("—")
         scrape_counts: list[int] = [0, 0, 0]  # pdf, text, images
         run_parallel = urls_mode_var.get() == "parallel" and len(urls) > 1
@@ -430,19 +450,6 @@ def main() -> None:
             base_cmd = [strigil_bin]
         else:
             base_cmd = [sys.executable, "-m", "strigil.cli"]
-        selected_types = []
-        if type_pdf_var.get():
-            selected_types.append("pdf")
-        if type_text_var.get():
-            selected_types.append("text")
-        if type_images_var.get():
-            selected_types.append("images")
-        if not selected_types:
-            append_log("Error: Select at least one file type.\n")
-            state_var.set("Idle")
-            progress_var.set("—")
-            scrape_btn_ref.config(state=tk.NORMAL)
-            return
 
         common_args = base_cmd.copy()
         common_args.extend(
@@ -508,105 +515,216 @@ def main() -> None:
                 parts.append("Large (> 1 MB)")
             append_log(f"Size: {', '.join(parts) if parts else 'none'}\n")
 
-        if run_parallel:
-            current_procs.clear()
-            num_urls = len(urls)
-            parallel_done_count: list[int] = [0]
+        def _execute_scrape() -> None:
+            state_var.set("Running")
+            if run_parallel:
+                current_procs.clear()
+                num_urls = len(urls)
+                parallel_done_count: list[int] = [0]
 
-            def parallel_worker(idx: int, url: str) -> None:
-                cmd = build_cmd([url])
-                try:
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                    )
-                    with procs_lock:
-                        current_procs.append(proc)
-                    prefix = f"[{idx + 1}/{num_urls}] "
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            output_queue.put(prefix + line)
-                except Exception as e:
-                    output_queue.put(f"[{idx + 1}/{num_urls}] Error: {e}\n")
-                finally:
+                def parallel_worker(idx: int, url: str) -> None:
+                    cmd = build_cmd([url])
+                    try:
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                        )
+                        with procs_lock:
+                            current_procs.append(proc)
+                        prefix = f"[{idx + 1}/{num_urls}] "
+                        if proc.stdout:
+                            for line in proc.stdout:
+                                output_queue.put(prefix + line)
+                    except Exception as e:
+                        output_queue.put(f"[{idx + 1}/{num_urls}] Error: {e}\n")
+                    finally:
+                        output_queue.put(None)
+
+                log_size_filter()
+                append_log(f"Running {num_urls} URLs in parallel.\n\n")
+                stop_btn.config(state=tk.NORMAL)
+                for i, u in enumerate(urls):
+                    t = threading.Thread(target=parallel_worker, args=(i, u), daemon=True)
+                    t.start()
+
+                def poll_queue_parallel() -> None:
+                    try:
+                        while True:
+                            line = output_queue.get_nowait()
+                            if line is None:
+                                parallel_done_count[0] += 1
+                                if parallel_done_count[0] >= num_urls:
+                                    break
+                            else:
+                                root.after(0, lambda l=line: (append_log(l), update_status(l)))
+                    except queue.Empty:
+                        pass
+                    if parallel_done_count[0] >= num_urls:
+                        if done_script:
+                            root.after(0, lambda: run_done_script_async(done_script, out_dir))
+                        root.after(0, _finish_run)
+                    else:
+                        root.after(150, poll_queue_parallel)
+
+                poll_queue_parallel()
+            else:
+                cmd = build_cmd(urls, include_done_script=True)
+
+                def worker() -> None:
+                    try:
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                        )
+                        current_proc[0] = proc
+                        if proc.stdout:
+                            for line in proc.stdout:
+                                output_queue.put(line)
+                    except Exception as e:
+                        output_queue.put(f"Error: {e}\n")
+                    finally:
+                        current_proc[0] = None
                     output_queue.put(None)
 
-            log_size_filter()
-            append_log(f"Running {num_urls} URLs in parallel.\n\n")
-            stop_btn.config(state=tk.NORMAL)
-            for i, u in enumerate(urls):
-                t = threading.Thread(target=parallel_worker, args=(i, u), daemon=True)
-                t.start()
-
-            def poll_queue_parallel(btn: tk.Widget) -> None:
-                try:
-                    while True:
-                        line = output_queue.get_nowait()
-                        if line is None:
-                            parallel_done_count[0] += 1
-                            if parallel_done_count[0] >= num_urls:
+                def poll_queue() -> None:
+                    saw_done = False
+                    try:
+                        while True:
+                            line = output_queue.get_nowait()
+                            if line is None:
+                                saw_done = True
                                 break
-                        else:
                             root.after(0, lambda l=line: (append_log(l), update_status(l)))
-                except queue.Empty:
-                    pass
-                if parallel_done_count[0] >= num_urls:
-                    if done_script:
-                        root.after(0, lambda: run_done_script_async(done_script, out_dir))
-                    root.after(0, lambda: (stop_btn_ref.config(state=tk.DISABLED), btn.config(state=tk.NORMAL)))
-                else:
-                    root.after(150, lambda: poll_queue_parallel(btn))
+                    except queue.Empty:
+                        pass
+                    if saw_done:
+                        root.after(0, _finish_run)
+                    else:
+                        root.after(150, poll_queue)
 
-            poll_queue_parallel(scrape_btn_ref)
-        else:
-            cmd = build_cmd(urls, include_done_script=True)
+                log_size_filter()
+                append_log(f"Running: {' '.join(cmd)}\n\n")
+                stop_btn.config(state=tk.NORMAL)
+                threading.Thread(target=worker, daemon=True).start()
+                poll_queue()
 
-            def worker() -> None:
+        if "images" in selected_types:
+            preview_queue: queue.Queue = queue.Queue()
+            # Capture GUI values on main thread before spawning worker
+            _use_browser = js_var.get()
+            _expected_hint = expected_images_var.get().strip()
+            _source_hint = source_var.get().strip() or None
+
+            def preview_worker() -> None:
                 try:
-                    proc = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                    )
-                    current_proc[0] = proc
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            output_queue.put(line)
+                    first_url = urls[0]
+                    with Fetcher(use_browser=_use_browser, timeout=60) as f:
+                        raw, charset = f.fetch_html(first_url, delay=0)
+                        html_str = raw.decode(charset, errors="replace")
+                        expected: int | None = None
+                        try:
+                            if _expected_hint and _expected_hint.isdigit():
+                                expected = int(_expected_hint)
+                        except (ValueError, tk.TclError):
+                            pass
+                        if expected is None:
+                            expected = infer_expected_images(html_str)
+                        ctx = DiscoveryContext(
+                            url=first_url,
+                            expected_images=expected,
+                            source_hint=_source_hint,
+                        )
+
+                        def fetch_manifest(u: str) -> bytes:
+                            return f.fetch_html(u, delay=0)[0]
+
+                        soup = BeautifulSoup(html_str, "lxml")
+                        img_urls = collect_image_urls(
+                            soup, first_url, html_str,
+                            fetch_manifest=fetch_manifest,
+                            context=ctx,
+                        )
+                        found = len(img_urls)
+                        expected_src = "hint" if _expected_hint else "inferred"
+                        preview_queue.put((expected, found, expected_src, None))
                 except Exception as e:
-                    output_queue.put(f"Error: {e}\n")
-                finally:
-                    current_proc[0] = None
-                output_queue.put(None)
+                    preview_queue.put((None, None, None, str(e)))
 
-            def poll_queue(btn: tk.Widget) -> None:
-                saw_done = False
-                try:
-                    while True:
-                        line = output_queue.get_nowait()
-                        if line is None:
-                            saw_done = True
-                            break
-                        root.after(0, lambda l=line: (append_log(l), update_status(l)))
-                except queue.Empty:
-                    pass
-                if saw_done:
-                    root.after(0, lambda: (stop_btn_ref.config(state=tk.DISABLED), btn.config(state=tk.NORMAL)))
+            def _format_preview_msg(expected: int | None, found: int, expected_src: str | None) -> tuple[str, str]:
+                """Return (log_line, success_indicator)."""
+                if expected is not None:
+                    line = f"Expected: {expected} ({expected_src})\nFound: {found} images\n"
+                    if found >= expected:
+                        indicator = "Looks good — proceeding."
+                    elif found >= expected * FALLBACK_SHORTFALL_RATIO:
+                        indicator = "Moderate shortfall — may still be acceptable."
+                    else:
+                        indicator = "Significant shortfall — consider adding expected-images hint or source adapter."
                 else:
-                    root.after(150, lambda: poll_queue(btn))
+                    line = f"Found: {found} images (no expected hint)\n"
+                    indicator = "Proceeding."
+                return line, indicator
 
-            log_size_filter()
-            append_log(f"Running: {' '.join(cmd)}\n\n")
-            stop_btn.config(state=tk.NORMAL)
-            threading.Thread(target=worker, daemon=True).start()
-            poll_queue(scrape_btn_ref)
+            def poll_preview() -> None:
+                try:
+                    r = preview_queue.get_nowait()
+                    expected, found, expected_src, err = r
+                    if err:
+                        root.after(0, lambda: (
+                            append_log(f"Preview error: {err}\n"),
+                            _finish_run(enable_rescrape=False),
+                        ))
+                        return
+                    line, indicator = _format_preview_msg(expected, found, expected_src)
+
+                    def on_preview_done() -> None:
+                        append_log(line)
+                        append_log(f"→ {indicator}\n\n")
+                        if verify_images_var.get():
+                            shortfall = expected is not None and found < expected * FALLBACK_SHORTFALL_RATIO
+                            full_msg = line.strip() + "\n\n" + indicator
+                            if shortfall:
+                                full_msg += "\n\nProceed anyway?"
+                            else:
+                                full_msg += "\n\nProceed with download?"
+                            ok = messagebox.askyesno(
+                                "Verify image count",
+                                full_msg,
+                                icon="question",
+                            )
+                            if ok:
+                                _execute_scrape()
+                            else:
+                                _finish_run(enable_rescrape=False)
+                        else:
+                            _execute_scrape()
+                    root.after(0, on_preview_done)
+                except queue.Empty:
+                    root.after(200, poll_preview)
+
+            threading.Thread(target=preview_worker, daemon=True).start()
+            poll_preview()
+        else:
+            _execute_scrape()
 
     btn_frame = ttk.Frame(bottom_frame)
     btn_frame.pack(side=tk.RIGHT)
+
+    scrape_btn = ttk.Button(btn_frame, text="Scrape")
+    stop_btn = ttk.Button(btn_frame, text="Stop", state=tk.DISABLED)
+
+    def _finish_run(enable_rescrape: bool = True) -> None:
+        """Re-enable scrape button after run completes or is stopped."""
+        stop_btn.config(state=tk.DISABLED)
+        scrape_btn.config(state=tk.NORMAL)
+        if enable_rescrape:
+            scrape_btn.config(text="Rescrape")
 
     def do_stop() -> None:
         with procs_lock:
@@ -625,9 +743,9 @@ def main() -> None:
             output_queue.put(None)
         state_var.set("Stopped")
         progress_var.set("—")
+        root.after(0, lambda: _finish_run(enable_rescrape=True))
 
-    scrape_btn = ttk.Button(btn_frame, text="Scrape")
-    stop_btn = ttk.Button(btn_frame, text="Stop", command=do_stop, state=tk.DISABLED)
+    stop_btn.config(command=do_stop)
     scrape_btn.config(command=lambda: run_scrape(scrape_btn, stop_btn))
     scrape_btn.pack(side=tk.LEFT, padx=(0, 8))
     stop_btn.pack(side=tk.LEFT, padx=(0, 8))
