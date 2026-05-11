@@ -47,6 +47,30 @@ def sanitize_basename(url: str, default_ext: str = "") -> str:
                 name = parts[-1] or "index"
         except StopIteration:
             name = parts[-1] or "index"
+    elif "/iiif/" in path_lower and "/full/" in path_lower and len(parts) >= 4:
+        # IIIF Image API 2/3: /iiif/3/{ident}/full/max/0/default.jpg (NYPL, etc.)
+        try:
+            idx = next(i for i, p in enumerate(parts) if p.lower() == "iiif")
+            if (
+                idx + 3 < len(parts)
+                and parts[idx + 1] in ("2", "3")
+                and parts[idx + 3].lower() == "full"
+            ):
+                ident = parts[idx + 2]
+                is_uuid = (
+                    len(ident) == 36
+                    and ident.count("-") == 4
+                    and all(c in "0123456789abcdef-" for c in ident.lower())
+                )
+                if ident.isdigit() or is_uuid:
+                    suffix = parts[-1].split("?")[0] if parts else "default"
+                    name = f"{ident}_{suffix}"
+                else:
+                    name = parts[-1] or "index"
+            else:
+                name = parts[-1] or "index"
+        except StopIteration:
+            name = parts[-1] or "index"
     else:
         name = parts[-1] or "index"
     name = name.split("?")[0]

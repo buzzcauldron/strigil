@@ -1,7 +1,10 @@
 """Extract PDF links, main text, and image URLs from HTML."""
 
+from __future__ import annotations
+
 import json
 import re
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
@@ -605,109 +608,295 @@ def find_derived_iiif_manifest_urls(page_url: str) -> list[str]:
     return urls
 
 
-def parse_iiif_manifest(manifest_data: dict) -> list[str]:
-    """
-    Parse IIIF 2.0 or 3.0 manifest JSON; return list of full-size image URLs.
-    Supports sequences/canvases (2.0), items (3.0), and NYPL-style rendering.
-    """
-    image_urls: list[str] = []
-    seen: set[str] = set()
-
-    def add_url(u: str) -> None:
-        if u and u not in seen:
-            seen.add(u)
-            image_urls.append(u)
-
-    def to_full_res_iiif(url: str) -> str:
-        """Rewrite IIIF URL to full resolution (full/max/0/default.jpg)."""
-        if "/full/max/" in url or "/full/full/" in url:
-            return url
-        # Replace size segment (e.g. full/!760,760 or full/300,) with full/max
-        if "/full/" in url and ("iiif" in url.lower() or "iiif" in url):
-            base = url.split("/full/")[0]
-            tail = "/0/default.jpg"
-            if "/0/default." in url:
-                tail = url[url.find("/0/default.") :]
-            return f"{base}/full/max{tail}"
-        return url
-
-    def image_from_resource(res: dict, service_id: str | None = None) -> str | None:
-        svc = res.get("service")
-        sid = None
-        if isinstance(svc, dict):
-            sid = svc.get("@id") or svc.get("id")
-        elif isinstance(svc, list) and svc:
-            first = svc[0]
-            sid = (first.get("@id") or first.get("id")) if isinstance(first, dict) else None
-        sid = sid or service_id
-        # Prefer IIIF Image API full size - IIIF 3 uses /full/max/
-        if sid:
-            return f"{str(sid).rstrip('/')}/full/max/0/default.jpg"
-        rid = res.get("@id") or res.get("id")
-        if isinstance(rid, str) and ("iiif" in rid.lower() or rid.endswith((".jpg", ".png", ".jpeg", ".webp"))):
-            return to_full_res_iiif(rid)
+def iiif_text_value(label: Any) -> str | None:
+    """Normalize IIIF 2/3 label (string, language map, or list) to a single display string."""
+    if label is None:
         return None
+    if isinstance(label, str):
+        s = label.strip()
+        return s or None
+    if isinstance(label, list):
+        for item in label:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            if isinstance(item, dict):
+                for v in item.values():
+                    if isinstance(v, list) and v and isinstance(v[0], str):
+                        s = v[0].strip()
+                        if s:
+                            return s
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        return None
+    if isinstance(label, dict):
+        for v in label.values():
+            if isinstance(v, list) and v and isinstance(v[0], str):
+                s = v[0].strip()
+                if s:
+                    return s
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+    return str(label).strip() or None
 
-    def best_url_from_rendering(rendering: list) -> str | None:
-        """Pick full-resolution URL from rendering options (e.g. NYPL)."""
-        if not isinstance(rendering, list):
-            return None
-        full_max = None
-        for r in rendering:
-            if not isinstance(r, dict):
-                continue
-            rid = r.get("id") or r.get("@id")
-            if not isinstance(rid, str):
-                continue
-            if "/full/max/" in rid:
-                return rid
-            if "/full/full/" in rid:
-                full_max = rid
-        return full_max
 
-    def walk_canvas(canvas: dict) -> None:
-        # NYPL: canvas.rendering lists options; prefer "Original" (full/max)
-        for u in (best_url_from_rendering(canvas.get("rendering")),):
-            if u:
-                add_url(u)
-                return
-        # IIIF 3: annotation pages under canvas.items
-        pages = canvas.get("items") or []
-        for page in pages:
-            if not isinstance(page, dict):
+def iiif_value_to_json_serializable(val: Any, *, _depth: int = 0) -> Any:
+    """
+    Convert IIIF Presentation values (language maps, nested objects, HTML strings)
+    to JSON-serializable structures. Drops noisy @context blobs.
+    """
+    if _depth > 40:
+        return str(val)[:8000] if val is not None else None
+    if val is None or isinstance(val, (str, int, float, bool)):
+        return val
+    if isinstance(val, list):
+        return [iiif_value_to_json_serializable(x, _depth=_depth + 1) for x in val]
+    if isinstance(val, dict):
+        out: dict[str, Any] = {}
+        for k, v in val.items():
+            if not isinstance(k, str):
                 continue
-            for ann in page.get("items") or []:
-                if not isinstance(ann, dict):
-                    continue
-                body = ann.get("body")
-                if isinstance(body, dict):
-                    url = image_from_resource(body)
-                    if url:
-                        add_url(url)
-                        return
-        # IIIF 2: images under canvas.images
-        images = canvas.get("images") or []
-        for img in images:
-            res = img.get("resource") if isinstance(img, dict) else None
-            if not res:
+            if k == "@context":
                 continue
-            url = image_from_resource(res)
-            if url:
-                add_url(url)
+            nk = "id" if k == "@id" else k
+            if nk.startswith("@") and nk not in ("@value", "@language", "@none"):
+                continue
+            out[nk] = iiif_value_to_json_serializable(v, _depth=_depth + 1)
+        return out
+    return str(val)
+
+
+def extract_iiif_descriptive_manifest(
+    manifest_data: dict,
+    *,
+    manifest_url: str | None = None,
+    source_page_url: str | None = None,
+) -> dict[str, Any]:
+    """
+    Full catalog / description block from a IIIF 2.x or 3.x Presentation manifest.
+    Includes label, summary, metadata, rights, and other common descriptive fields.
+    """
+    block: dict[str, Any] = {}
+    if manifest_url:
+        block["manifest_url"] = manifest_url
+    if manifest_url or source_page_url:
+        block["sources"] = {
+            "kind": "iiif_presentation",
+            "manifest_url": manifest_url,
+            "page_url": source_page_url,
+        }
+    mid = manifest_data.get("id") or manifest_data.get("@id")
+    if mid:
+        block["id"] = str(mid)
+    typ = manifest_data.get("type")
+    if typ:
+        block["type"] = typ
+    if manifest_data.get("label") is not None:
+        block["label"] = iiif_value_to_json_serializable(manifest_data.get("label"))
+    if manifest_data.get("summary") is not None:
+        block["summary"] = iiif_value_to_json_serializable(manifest_data.get("summary"))
+    if manifest_data.get("metadata") is not None:
+        block["metadata"] = iiif_value_to_json_serializable(manifest_data.get("metadata"))
+    for key in (
+        "requiredStatement",
+        "rights",
+        "viewingDirection",
+        "behavior",
+        "partOf",
+        "homepage",
+        "seeAlso",
+        "provider",
+        "thumbnail",
+        "navDate",
+    ):
+        if manifest_data.get(key) is not None:
+            block[key] = iiif_value_to_json_serializable(manifest_data[key])
+    return block
+
+
+def extract_html_description_snippets(soup: BeautifulSoup, page_url: str) -> dict[str, Any] | None:
+    """
+    Pull common HTML-level catalog text (meta description, Open Graph, document title,
+    first JSON-LD block) when no IIIF manifest is available or as a supplement.
+    """
+    out: dict[str, Any] = {
+        "sources": {
+            "kind": "html_document",
+            "page_url": page_url,
+        }
+    }
+    meta = soup.find("meta", attrs={"name": lambda x: x and str(x).lower() == "description"})
+    if meta and meta.get("content"):
+        c = str(meta["content"]).strip()
+        if c:
+            out["meta_description"] = c
+    for prop, key in (("og:title", "og_title"), ("og:description", "og_description")):
+        tag = soup.find("meta", attrs={"property": prop})
+        if tag and tag.get("content"):
+            c = str(tag["content"]).strip()
+            if c:
+                out[key] = c
+    tw = soup.find("meta", attrs={"name": lambda x: x and str(x).lower() == "twitter:description"})
+    if tw and tw.get("content"):
+        c = str(tw["content"]).strip()
+        if c:
+            out["twitter_description"] = c
+    title_tag = soup.find("title")
+    if title_tag and title_tag.string:
+        t = title_tag.get_text(strip=True)
+        if t:
+            out["document_title"] = t
+    for script in soup.find_all("script", attrs={"type": lambda x: x and "ld+json" in str(x).lower()}):
+        raw = script.string or script.get_text() or ""
+        raw = raw.strip()
+        if not raw or len(raw) > 100_000:
+            continue
+        try:
+            parsed = json.loads(raw)
+            out["json_ld"] = iiif_value_to_json_serializable(parsed)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            out["json_ld_raw"] = raw[:50_000]
+        break
+    if len(out) <= 1:
+        return None
+    return out
+
+
+def _iiif_manifest_object_meta(manifest_data: dict) -> tuple[str | None, Any]:
+    """Work-level label and @id/id for the manifest."""
+    return (
+        iiif_text_value(manifest_data.get("label")),
+        manifest_data.get("@id") or manifest_data.get("id"),
+    )
+
+
+def _to_full_res_iiif(url: str) -> str:
+    """Rewrite IIIF URL to full resolution (full/max/0/default.jpg)."""
+    if "/full/max/" in url or "/full/full/" in url:
+        return url
+    if "/full/" in url and ("iiif" in url.lower() or "iiif" in url):
+        base = url.split("/full/")[0]
+        tail = "/0/default.jpg"
+        if "/0/default." in url:
+            tail = url[url.find("/0/default.") :]
+        return f"{base}/full/max{tail}"
+    return url
+
+
+def _image_from_iiif_resource(res: dict, service_id: str | None = None) -> str | None:
+    svc = res.get("service")
+    sid = None
+    if isinstance(svc, dict):
+        sid = svc.get("@id") or svc.get("id")
+    elif isinstance(svc, list) and svc:
+        first = svc[0]
+        sid = (first.get("@id") or first.get("id")) if isinstance(first, dict) else None
+    sid = sid or service_id
+    if sid:
+        return f"{str(sid).rstrip('/')}/full/max/0/default.jpg"
+    rid = res.get("@id") or res.get("id")
+    if isinstance(rid, str) and ("iiif" in rid.lower() or rid.endswith((".jpg", ".png", ".jpeg", ".webp"))):
+        return _to_full_res_iiif(rid)
+    return None
+
+
+def _best_url_from_canvas_rendering(rendering: list) -> str | None:
+    """Pick full-resolution URL from rendering options (e.g. NYPL)."""
+    if not isinstance(rendering, list):
+        return None
+    full_max = None
+    for r in rendering:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("id") or r.get("@id")
+        if not isinstance(rid, str):
+            continue
+        if "/full/max/" in rid:
+            return rid
+        if "/full/full/" in rid:
+            full_max = rid
+    return full_max
+
+
+def _canvas_main_image_url(canvas: dict) -> str | None:
+    """Single best image URL for a IIIF Presentation canvas (full-res IIIF Image API where possible)."""
+    u = _best_url_from_canvas_rendering(canvas.get("rendering"))
+    if u:
+        return u
+    pages = canvas.get("items") or []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        for ann in page.get("items") or []:
+            if not isinstance(ann, dict):
+                continue
+            body = ann.get("body")
+            if isinstance(body, dict):
+                url = _image_from_iiif_resource(body)
+                if url:
+                    return url
+    images = canvas.get("images") or []
+    for img in images:
+        res = img.get("resource") if isinstance(img, dict) else None
+        if not res:
+            continue
+        url = _image_from_iiif_resource(res)
+        if url:
+            return url
+    return None
+
+
+def parse_iiif_manifest_pages(
+    manifest_data: dict,
+    *,
+    manifest_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Parse IIIF 2.x / 3.x manifest: ordered pages with image URLs and canvas labels.
+    Each dict includes: url, page_index (1-based), label, canvas_id, manifest_url,
+    object_label, manifest_id.
+    """
+    object_label, manifest_id = _iiif_manifest_object_meta(manifest_data)
+    pages: list[dict[str, Any]] = []
+    page_index = 0
 
     items_or_seqs = manifest_data.get("sequences") or manifest_data.get("items") or []
     for thing in items_or_seqs:
         if not isinstance(thing, dict):
             continue
         if thing.get("type") == "Canvas":
-            walk_canvas(thing)
+            canvas_list = [thing]
         else:
-            canvases = thing.get("canvases") or thing.get("items") or []
-            for canvas in canvases:
-                if isinstance(canvas, dict):
-                    walk_canvas(canvas)
+            canvas_list = [
+                c for c in (thing.get("canvases") or thing.get("items") or []) if isinstance(c, dict)
+            ]
+        for canvas in canvas_list:
+            url = _canvas_main_image_url(canvas)
+            if not url:
+                continue
+            page_index += 1
+            cid = canvas.get("@id") or canvas.get("id")
+            cid_str = str(cid) if cid is not None else None
+            pages.append(
+                {
+                    "url": url,
+                    "page_index": page_index,
+                    "label": iiif_text_value(canvas.get("label")),
+                    "canvas_id": cid_str,
+                    "manifest_url": manifest_url,
+                    "object_label": object_label,
+                    "manifest_id": str(manifest_id) if manifest_id is not None else None,
+                }
+            )
+    return pages
 
-    return image_urls
+
+def parse_iiif_manifest(manifest_data: dict) -> list[str]:
+    """
+    Parse IIIF 2.0 or 3.0 manifest JSON; return list of full-size image URLs.
+    Supports sequences/canvases (2.0), items (3.0), and NYPL-style rendering.
+    """
+    return [p["url"] for p in parse_iiif_manifest_pages(manifest_data)]
 
 
 def _looks_like_image(url_or_path: str) -> bool:

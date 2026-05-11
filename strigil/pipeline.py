@@ -11,7 +11,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Queue
-from typing import Callable, ContextManager
+from typing import Any, Callable, ContextManager
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
@@ -21,9 +21,10 @@ try:
 except ImportError:
     tqdm = None
 
-from strigil.discovery import collect_image_urls
+from strigil.discovery import collect_image_entries
 from strigil.schema import DiscoveryContext
 from strigil.extractors import (
+    extract_html_description_snippets,
     find_page_links,
     find_pdf_urls,
     extract_text,
@@ -68,14 +69,14 @@ def _is_large_iiif_image(url: str) -> bool:
 
 
 def _effective_asset_workers(
-    work_items: list[tuple[str, str, str | None]],
+    work_items: list[tuple[str, str, str | None, dict[str, Any] | None]],
     requested: int,
     use_browser: bool,
 ) -> int:
     """Reduce parallelism when work is mostly large IIIF images (avoids timeouts)."""
     if use_browser or requested <= 1:
         return 1 if use_browser else requested
-    image_items = [(u, b, ct) for u, b, ct in work_items if ct != "application/pdf"]
+    image_items = [(u, b, ct) for u, b, ct, _ in work_items if ct != "application/pdf"]
     large_count = sum(1 for _, best_url, _ in image_items if _is_large_iiif_image(best_url))
     if large_count >= LARGE_IIIF_MIN_COUNT and large_count >= len(image_items) // 2:
         return 1
@@ -114,10 +115,253 @@ def _should_skip_existing_by_size(
 @dataclass
 class MapResult:
     """Result of mapping a page: URLs to scrape, no downloads yet."""
+
+    page_url: str = ""
     page_links: list[str] = field(default_factory=list)
     pdf_urls: list[str] = field(default_factory=list)
-    image_items: list[tuple[str, str, str]] = field(default_factory=list)  # (url, best_url, content_type)
+    image_items: list[tuple[str, str, str, dict[str, Any] | None]] = field(default_factory=list)
     text: tuple[str, str] | None = None  # (page_url, extracted_text) or None
+    iiif_descriptions: list[dict[str, Any]] = field(default_factory=list)
+    html_descriptions: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _maybe_collect_html_description(
+    soup: BeautifulSoup,
+    page_url: str,
+    discovery_context: DiscoveryContext | None,
+) -> None:
+    """Append HTML meta/OG/JSON-LD snippets to discovery context when present."""
+    if not discovery_context:
+        return
+    h = extract_html_description_snippets(soup, page_url)
+    if h:
+        discovery_context.html_descriptions.append(h)
+
+
+def _merge_iiif_description_blocks(target: dict[str, Any], blocks: list[dict[str, Any]] | None) -> None:
+    """Merge IIIF descriptive manifest records into manuscript target (dedupe by manifest URL or id)."""
+    if not blocks:
+        return
+    cur = target.get("iiif_descriptions")
+    if not isinstance(cur, list):
+        cur = []
+    seen = {(b.get("manifest_url") or b.get("id")) for b in cur if isinstance(b, dict)}
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        key = b.get("manifest_url") or b.get("id")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        cur.append(b)
+    target["iiif_descriptions"] = cur
+
+
+def _merge_html_description_snippets(target: dict[str, Any], blocks: list[dict[str, Any]] | None) -> None:
+    """Merge HTML-derived description snippets (dedupe by page_url in sources)."""
+    if not blocks:
+        return
+    cur = target.get("html_descriptions")
+    if not isinstance(cur, list):
+        cur = []
+    seen_pages: set[str] = set()
+    for b in cur:
+        if isinstance(b, dict) and isinstance(b.get("sources"), dict):
+            pu = b["sources"].get("page_url")
+            if isinstance(pu, str) and pu:
+                seen_pages.add(pu)
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        pu = None
+        if isinstance(b.get("sources"), dict):
+            pu = b["sources"].get("page_url")
+        if isinstance(pu, str) and pu and pu in seen_pages:
+            continue
+        if isinstance(pu, str) and pu:
+            seen_pages.add(pu)
+        cur.append(b)
+    target["html_descriptions"] = cur
+
+
+def _finalize_manuscript_sources(m: dict[str, Any]) -> None:
+    """
+    Build manuscript.description_sources: deduped {type, url} entries from
+    source_url, sources[], iiif_descriptions[].sources, html_descriptions[].sources,
+    and top-level manifest URLs.
+    """
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, u: str | None) -> None:
+        if not u or not isinstance(u, str):
+            return
+        u = u.strip()
+        if not u:
+            return
+        key = (kind, u)
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append({"type": kind, "url": u})
+
+    su = m.get("source_url")
+    if isinstance(su, str):
+        add("scraped_page", su)
+    for s in m.get("sources") or []:
+        if isinstance(s, str):
+            add("scraped_page", s)
+    for b in m.get("iiif_descriptions") or []:
+        if not isinstance(b, dict):
+            continue
+        src = b.get("sources")
+        if isinstance(src, dict):
+            add("scraped_page", src.get("page_url"))
+            add("iiif_manifest", src.get("manifest_url"))
+        if isinstance(b.get("manifest_url"), str):
+            add("iiif_manifest", b["manifest_url"])
+    for b in m.get("html_descriptions") or []:
+        if not isinstance(b, dict):
+            continue
+        src = b.get("sources")
+        if isinstance(src, dict):
+            add("scraped_page", src.get("page_url"))
+    for u in m.get("manifest_urls") or []:
+        if isinstance(u, str):
+            add("iiif_manifest", u)
+    m["description_sources"] = entries
+
+
+def apply_manuscript_to_manifest(
+    manifest: dict,
+    out_dir: Path,
+    domain: str,
+    page_url: str,
+    image_items: list[tuple[str, str, str, dict[str, Any] | None]],
+    iiif_descriptions: list[dict[str, Any]] | None = None,
+    html_descriptions: list[dict[str, Any]] | None = None,
+) -> None:
+    """Attach ordered pages (labels + local image paths) for manuscript / IIIF reconstruction."""
+    urls_map = manifest.get("urls") or {}
+    if not image_items:
+        if iiif_descriptions or html_descriptions:
+            stub = manifest.setdefault("manuscript", {})
+            _merge_iiif_description_blocks(stub, iiif_descriptions)
+            _merge_html_description_snippets(stub, html_descriptions)
+            if page_url:
+                stub.setdefault("source_url", page_url)
+            _finalize_manuscript_sources(stub)
+        return
+    if not urls_map:
+        if iiif_descriptions or html_descriptions:
+            stub = manifest.setdefault("manuscript", {})
+            _merge_iiif_description_blocks(stub, iiif_descriptions)
+            _merge_html_description_snippets(stub, html_descriptions)
+            if page_url:
+                stub.setdefault("source_url", page_url)
+            _finalize_manuscript_sources(stub)
+        return
+    pages: list[dict[str, Any]] = []
+    manifest_urls_order: list[str] = []
+    for img_url, best_url, _ct, meta in image_items:
+        path_str = urls_map.get(img_url)
+        if not path_str:
+            continue
+        dest = Path(path_str)
+        try:
+            rel = dest.resolve().relative_to((out_dir / domain).resolve())
+        except ValueError:
+            rel = dest.name
+        entry: dict[str, Any] = {
+            "image_url": img_url,
+            "fetch_url": best_url,
+            "local_path": str(rel).replace("\\", "/"),
+        }
+        if meta:
+            for k in (
+                "label",
+                "canvas_id",
+                "page_index",
+                "manifest_url",
+                "object_label",
+                "manifest_id",
+                "discovery_order",
+                "source",
+            ):
+                if meta.get(k) is not None:
+                    entry[k] = meta[k]
+            mu = meta.get("manifest_url")
+            if isinstance(mu, str) and mu and mu not in manifest_urls_order:
+                manifest_urls_order.append(mu)
+        pages.append(entry)
+    if not pages:
+        if iiif_descriptions or html_descriptions:
+            stub = manifest.setdefault("manuscript", {})
+            _merge_iiif_description_blocks(stub, iiif_descriptions)
+            _merge_html_description_snippets(stub, html_descriptions)
+            if page_url:
+                stub.setdefault("source_url", page_url)
+            _finalize_manuscript_sources(stub)
+        return
+    work_label = next((p.get("object_label") for p in pages if p.get("object_label")), None)
+    new_block: dict[str, Any] = {
+        "source_url": page_url,
+        "page_count": len(pages),
+        "pages": pages,
+    }
+    if work_label:
+        new_block["work_label"] = work_label
+    if manifest_urls_order:
+        new_block["manifest_urls"] = manifest_urls_order
+    if iiif_descriptions:
+        _merge_iiif_description_blocks(new_block, iiif_descriptions)
+    if html_descriptions:
+        _merge_html_description_snippets(new_block, html_descriptions)
+    _finalize_manuscript_sources(new_block)
+
+    existing = manifest.get("manuscript")
+    if not existing:
+        manifest["manuscript"] = new_block
+        return
+
+    def _sources_list(m: dict[str, Any]) -> list[str]:
+        su = m.get("sources")
+        if isinstance(su, list):
+            return [str(s) for s in su if s]
+        one = m.get("source_url")
+        if isinstance(one, str) and one:
+            return [one]
+        return []
+
+    sources = _sources_list(existing)
+    if page_url and page_url not in sources:
+        sources.append(page_url)
+
+    prev_pages = existing.get("pages") if isinstance(existing.get("pages"), list) else []
+    merged_pages = prev_pages + pages
+
+    merged: dict[str, Any] = {
+        "sources": sources,
+        "page_count": len(merged_pages),
+        "pages": merged_pages,
+    }
+    wl_prev = existing.get("work_label")
+    merged["work_label"] = work_label or wl_prev
+    mu_prev = existing.get("manifest_urls") if isinstance(existing.get("manifest_urls"), list) else []
+    mu_joined = list(dict.fromkeys([*(mu_prev or []), *manifest_urls_order]))
+    if mu_joined:
+        merged["manifest_urls"] = mu_joined
+    prev_desc = existing.get("iiif_descriptions") if isinstance(existing.get("iiif_descriptions"), list) else []
+    new_desc = new_block.get("iiif_descriptions") if isinstance(new_block.get("iiif_descriptions"), list) else []
+    _merge_iiif_description_blocks(merged, prev_desc)
+    _merge_iiif_description_blocks(merged, new_desc)
+    prev_h = existing.get("html_descriptions") if isinstance(existing.get("html_descriptions"), list) else []
+    new_h = new_block.get("html_descriptions") if isinstance(new_block.get("html_descriptions"), list) else []
+    _merge_html_description_snippets(merged, prev_h)
+    _merge_html_description_snippets(merged, new_h)
+    _finalize_manuscript_sources(merged)
+    manifest["manuscript"] = merged
 
 
 def is_403(e: BaseException) -> bool:
@@ -181,6 +425,7 @@ def map_page(
     except Exception:
         html_str = raw.decode("utf-8", errors="replace")
     soup = BeautifulSoup(html_str, "lxml")
+    _maybe_collect_html_description(soup, url, discovery_context)
 
     page_links = find_page_links(soup, url, same_domain or urlparse(url).netloc)
 
@@ -191,7 +436,7 @@ def map_page(
                 break
             pdf_urls.append(u)
 
-    image_items: list[tuple[str, str, str]] = []
+    image_items: list[tuple[str, str, str, dict[str, Any] | None]] = []
     if "images" in want:
         # Manifest URLs return JSON; use httpx (not browser) so we get raw JSON
         def fetch_manifest(u: str) -> bytes:
@@ -199,7 +444,7 @@ def map_page(
                 with Fetcher(use_browser=False) as f:
                     return f.fetch_html(u, delay=0)[0]
             return fetcher.fetch_html(u, delay=delay)[0]
-        img_urls = collect_image_urls(
+        discovered = collect_image_entries(
             soup, url, html_str,
             fetch_manifest=fetch_manifest,
             limit=limit_images,
@@ -210,14 +455,16 @@ def map_page(
         seen_best_urls: set[str] = set()
 
         if not need_size_filter:
-            for u in img_urls:
+            for u, page_meta in discovered:
                 best = get_best_image_url(u, None, try_high_res=True)
                 if best in seen_best_urls:
                     continue
                 seen_best_urls.add(best)
-                image_items.append((u, best, "image"))
+                image_items.append((u, best, "image", page_meta))
         else:
             effective_head_workers = 1 if use_browser else head_workers
+            img_urls = [t[0] for t in discovered]
+            meta_by_url = {t[0]: t[1] for t in discovered}
             if effective_head_workers > 1 and len(img_urls) > 4:
                 _head = lambda u: head_one_image(u, fetcher, delay, use_shared=False)
                 with ThreadPoolExecutor(max_workers=min(effective_head_workers, len(img_urls) or 1)) as ex:
@@ -239,7 +486,7 @@ def map_page(
                     if max_image_size is not None and content_length > max_image_size:
                         continue
                 seen_best_urls.add(best_url)
-                image_items.append((img_url, best_url, ct or "image"))
+                image_items.append((img_url, best_url, ct or "image", meta_by_url.get(img_url)))
 
     text: tuple[str, str] | None = None
     if "text" in want:
@@ -247,7 +494,15 @@ def map_page(
         if extracted.strip():
             text = (url, extracted)
 
-    return MapResult(page_links=page_links, pdf_urls=pdf_urls, image_items=image_items, text=text)
+    return MapResult(
+        page_url=url,
+        page_links=page_links,
+        pdf_urls=pdf_urls,
+        image_items=image_items,
+        text=text,
+        iiif_descriptions=list(discovery_context.iiif_descriptions) if discovery_context else [],
+        html_descriptions=list(discovery_context.html_descriptions) if discovery_context else [],
+    )
 
 
 def scrape_assets(
@@ -291,15 +546,15 @@ def scrape_assets(
                 progress_callback("text")
             print(f"  Text: {dest}", file=sys.stderr)
 
-    work: list[tuple[str, str, str | None]] = []  # (url, best_url, ct)
+    work: list[tuple[str, str, str | None, dict[str, Any] | None]] = []
     for u in result.pdf_urls:
         if u not in urls_map:
-            work.append((u, u, "application/pdf"))
-    for img_url, best_url, ct in result.image_items:
+            work.append((u, u, "application/pdf", None))
+    for img_url, best_url, ct, meta in result.image_items:
         if img_url not in urls_map:
-            work.append((img_url, best_url, ct))
+            work.append((img_url, best_url, ct, meta))
 
-    n_pdf = sum(1 for _, _, ct in work if ct == "application/pdf")
+    n_pdf = sum(1 for _, _, ct, _ in work if ct == "application/pdf")
     n_img = len(work) - n_pdf
     n_text = 1 if result.text and not _exists(result.text[0], "text") else 0
     total_assets = n_text + len(work)
@@ -319,10 +574,10 @@ def scrape_assets(
     done_lock = threading.Lock()
     n_work = len(work)
 
-    def _download_one(item: tuple[str, str, str | None], stagger_delay: float = 0) -> bool:
+    def _download_one(item: tuple[str, str, str | None, dict[str, Any] | None], stagger_delay: float = 0) -> bool:
         if stagger_delay > 0:
             time.sleep(stagger_delay)
-        url, best_url, ct = item
+        url, best_url, ct, _meta = item
         if url in urls_map:
             return True
         is_pdf = ct == "application/pdf"
@@ -373,7 +628,7 @@ def scrape_assets(
             ok = _download_one(item, stagger_delay=0)
             if ok and progress_callback:
                 progress_callback("asset")
-            url, best_url, ct = item
+            url, best_url, ct, _ = item
             with done_lock:
                 done_count[0] += 1
             print(_progress_msg(ct, ok, url, best_url), file=sys.stderr)
@@ -385,13 +640,23 @@ def scrape_assets(
             }
             for fut in as_completed(futures):
                 item = futures[fut]
-                url, best_url, ct = item
+                url, best_url, ct, _ = item
                 ok = fut.result()
                 if ok and progress_callback:
                     progress_callback("asset")
                 with done_lock:
                     done_count[0] += 1
                 print(_progress_msg(ct, ok, url, best_url), file=sys.stderr)
+
+    apply_manuscript_to_manifest(
+        manifest,
+        out_dir,
+        domain,
+        result.page_url or "",
+        result.image_items,
+        iiif_descriptions=result.iiif_descriptions or None,
+        html_descriptions=result.html_descriptions or None,
+    )
 
 
 def scrape_page(
@@ -433,6 +698,7 @@ def scrape_page(
         html_str = raw.decode("utf-8", errors="replace")
 
     soup = BeautifulSoup(html_str, "lxml")
+    _maybe_collect_html_description(soup, url, discovery_context)
 
     # Build PDF work list
     pdf_work: list[tuple[str, Path]] = []
@@ -463,18 +729,19 @@ def scrape_page(
                     progress_callback("text")
                 print(f"  Text: {dest}", file=sys.stderr)
 
-    # Build image work list (url for urls_map key, best_url to fetch, ct, dest)
-    image_work: list[tuple[str, str, str, Path]] = []
+    # Build image work list (url for urls_map key, best_url to fetch, ct, dest, manuscript_meta)
+    image_work: list[tuple[str, str, str, Path, dict[str, Any] | None]] = []
     need_size_filter = min_image_size is not None or max_image_size is not None
     seen_best_urls: set[str] = set()
     if "images" in want:
         fetch_manifest = lambda u: fetcher.fetch_bytes(u, delay=delay)
-        for img_url in collect_image_urls(
+        discovered = collect_image_entries(
             soup, url, html_str,
             fetch_manifest=fetch_manifest,
             limit=None,
             context=discovery_context,
-        ):
+        )
+        for img_url, page_meta in discovered:
             if limit_images is not None and len(image_work) >= limit_images:
                 break
             if img_url in urls_map:
@@ -499,14 +766,14 @@ def scrape_page(
             seen_best_urls.add(best_url)
             canon = path_for_image_canonical(out_dir, domain, img_url, ct)
             dest = canon if canon.exists() else path_for_image(out_dir, domain, best_url, ct)
-            image_work.append((img_url, best_url, ct or "image", dest))
+            image_work.append((img_url, best_url, ct or "image", dest, page_meta))
 
     # Run PDF + image downloads (parallel when asset_workers > 1)
     # Work items: (fetch_url, dest, ct, map_key) for urls_map[map_key] = str(dest)
     asset_tasks: list[tuple[str, Path, str, str]] = []
     for pdf_url, dest in pdf_work:
         asset_tasks.append((pdf_url, dest, "application/pdf", pdf_url))
-    for img_url, best_url, ct, dest in image_work:
+    for img_url, best_url, ct, dest, _page_meta in image_work:
         asset_tasks.append((best_url, dest, ct, img_url))
 
     if not asset_tasks:
@@ -625,6 +892,16 @@ def scrape_page(
                 except Exception:
                     pass
 
+    image_items_summary = [(a, b, c, e) for a, b, c, d, e in image_work]
+    apply_manuscript_to_manifest(
+        manifest,
+        out_dir,
+        domain,
+        url,
+        image_items_summary,
+        iiif_descriptions=list(discovery_context.iiif_descriptions) if discovery_context else None,
+        html_descriptions=list(discovery_context.html_descriptions) if discovery_context else None,
+    )
     save_manifest(mf_path, manifest)
 
     if not collect_links:
@@ -836,6 +1113,7 @@ def run_single_or_sequential_crawl(
                             url=url,
                             expected_images=getattr(args, "expected_images", None),
                             source_hint=getattr(args, "source", None),
+                            manuscript_mode=getattr(args, "manuscript", False),
                         )
                         links = scrape_page(
                             url, out_dir, args.delay, manifest, fetcher,
@@ -935,6 +1213,7 @@ def run_single_or_sequential_crawl(
                                 url=args.url,
                                 expected_images=getattr(args, "expected_images", None),
                                 source_hint=getattr(args, "source", None),
+                                manuscript_mode=getattr(args, "manuscript", False),
                             )
                             map_result = map_page(
                                 args.url,
@@ -988,6 +1267,7 @@ def run_single_or_sequential_crawl(
                                 url=args.url,
                                 expected_images=getattr(args, "expected_images", None),
                                 source_hint=getattr(args, "source", None),
+                                manuscript_mode=getattr(args, "manuscript", False),
                             )
                             scrape_page(
                                 args.url, out_dir, delay_i, manifest, iter_fetcher,
@@ -1044,6 +1324,7 @@ def crawl_parallel(
     human_bypass: bool = False,
     expected_images: int | None = None,
     source_hint: str | None = None,
+    manuscript_mode: bool = False,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -1074,6 +1355,7 @@ def crawl_parallel(
                         url=url,
                         expected_images=expected_images,
                         source_hint=source_hint,
+                        manuscript_mode=manuscript_mode,
                     )
                     links = scrape_page(
                         url, out_dir, delay, manifest, fetcher,

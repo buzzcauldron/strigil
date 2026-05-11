@@ -16,17 +16,20 @@ class WellcomeAdapter:
     def matches(self, url: str) -> bool:
         return bool(_WELLCOME_WORKS_RE.search(url or ""))
 
+    def get_iiif_manifest_url(self, url: str, fetch: Callable[[str], bytes] | None) -> str | None:
+        """Resolve the IIIF Presentation manifest URL for a works page."""
+        m = _WELLCOME_WORKS_RE.search(url or "")
+        if not m or not fetch:
+            return None
+        return self._get_manifest_url(m.group(1), fetch)
+
     def extract_image_urls(
         self,
         url: str,
         html: str,
         fetch: Callable[[str], bytes] | None,
     ) -> list[str]:
-        m = _WELLCOME_WORKS_RE.search(url or "")
-        if not m or not fetch:
-            return []
-        work_id = m.group(1)
-        manifest_url = self._get_manifest_url(work_id, fetch)
+        manifest_url = self.get_iiif_manifest_url(url, fetch)
         if not manifest_url:
             return []
         try:

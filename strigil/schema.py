@@ -8,9 +8,9 @@ generic HTML) and runs the appropriate extraction strategy to get full-resolutio
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 from bs4 import BeautifulSoup
 
@@ -32,8 +32,9 @@ from strigil.extractors import (
     find_iiif_manifest_urls,
     find_nypl_iiif_image_urls,
     find_nypl_manifest_urls,
+    extract_iiif_descriptive_manifest,
     image_format_priority,
-    parse_iiif_manifest,
+    parse_iiif_manifest_pages,
     should_skip_image_url,
 )
 
@@ -71,6 +72,35 @@ class DiscoveryContext:
     expected_images: int | None = None  # User hint: we expect ~N images
     source_hint: str | None = None  # User hint: force adapter (e.g. "wellcome", "archive_org")
     url: str = ""
+    manuscript_mode: bool = False  # Preserve manifest order; label all pages in manifest.json
+    # IIIF Presentation descriptive data (metadata, summary, …) keyed per manifest URL
+    iiif_descriptions: list[dict[str, Any]] = field(default_factory=list)
+    # HTML-level meta / OG / JSON-LD snippets from the scraped page
+    html_descriptions: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _record_iiif_description(
+    ctx: DiscoveryContext | None,
+    manifest_data: dict,
+    manifest_url: str | None,
+) -> None:
+    """Append full IIIF manifest description if not already recorded for this manifest."""
+    if ctx is None:
+        return
+    try:
+        page_u = (ctx.url or "").strip() or None
+        block = extract_iiif_descriptive_manifest(
+            manifest_data,
+            manifest_url=manifest_url,
+            source_page_url=page_u,
+        )
+    except Exception:
+        return
+    key = block.get("manifest_url") or block.get("id")
+    existing = {(b.get("manifest_url") or b.get("id")) for b in ctx.iiif_descriptions if isinstance(b, dict)}
+    if key and key in existing:
+        return
+    ctx.iiif_descriptions.append(block)
 
 
 def detect_image_schemas(
@@ -143,93 +173,231 @@ def detect_image_schemas(
     return results
 
 
-def _extract_contentdm(
-    url: str,
-    html_str: str,
-) -> list[str]:
-    """Extract image URLs using CONTENTdm IIIF."""
-    return find_contentdm_full_res_urls(url, html_str)
+def _page_meta_from_iiif_page(page: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in page.items() if k != "url"}
 
 
-def _extract_nypl(
+def _extract_archive_org_entries(
     url: str,
     html_str: str,
     fetch_manifest: Callable[[str], bytes] | None,
-) -> list[str]:
-    """Extract image URLs using NYPL manifest + IIIF 3."""
-    urls: list[str] = []
-    # Prefer manifest (gets all canvases)
+    ctx: DiscoveryContext | None = None,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    from strigil.archive_org import fetch_image_entries_from_metadata
+
+    out: list[tuple[str, dict[str, Any] | None]] = []
+    manifest_urls = find_derived_iiif_manifest_urls(url or "")
+    if fetch_manifest and manifest_urls:
+        for manifest_url in manifest_urls:
+            try:
+                raw = fetch_manifest(manifest_url)
+                data = json.loads(raw.decode("utf-8"))
+                _record_iiif_description(ctx, data, manifest_url)
+                for page in parse_iiif_manifest_pages(data, manifest_url=manifest_url):
+                    out.append((page["url"], _page_meta_from_iiif_page(page)))
+                if out:
+                    return out
+            except Exception:
+                pass
+    m = _ARCHIVE_ORG_DETAILS_RE.search(url or "")
+    if m:
+        for img_url, fname in fetch_image_entries_from_metadata(m.group(1)):
+            meta: dict[str, Any] = {"source": "archive_org_metadata"}
+            if fname:
+                meta["label"] = fname
+            out.append((img_url, meta))
+    return out
+
+
+def _extract_wellcome_entries(
+    url: str,
+    fetch_manifest: Callable[[str], bytes] | None,
+    ctx: DiscoveryContext | None = None,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    from strigil.adapters.wellcome import WellcomeAdapter
+
+    wa = WellcomeAdapter()
+    mu = wa.get_iiif_manifest_url(url, fetch_manifest)
+    if not mu or not fetch_manifest:
+        return []
+    try:
+        raw = fetch_manifest(mu)
+        data = json.loads(raw.decode("utf-8"))
+        _record_iiif_description(ctx, data, mu)
+        return [(p["url"], _page_meta_from_iiif_page(p)) for p in parse_iiif_manifest_pages(data, manifest_url=mu)]
+    except Exception:
+        return []
+
+
+def _extract_nypl_entries(
+    url: str,
+    html_str: str,
+    fetch_manifest: Callable[[str], bytes] | None,
+    ctx: DiscoveryContext | None = None,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    out: list[tuple[str, dict[str, Any] | None]] = []
     if fetch_manifest:
         for manifest_url in find_nypl_manifest_urls(url):
             try:
                 raw = fetch_manifest(manifest_url)
                 data = json.loads(raw.decode("utf-8"))
-                urls.extend(parse_iiif_manifest(data))
+                _record_iiif_description(ctx, data, manifest_url)
+                for page in parse_iiif_manifest_pages(data, manifest_url=manifest_url):
+                    out.append((page["url"], _page_meta_from_iiif_page(page)))
             except Exception:
                 pass
-    if not urls:
-        urls = find_nypl_iiif_image_urls(html_str)
-    return urls
+    if not out:
+        for u in find_nypl_iiif_image_urls(html_str):
+            out.append((u, None))
+    return out
 
 
-def _extract_iiif_manifest(
+def _extract_iiif_manifest_entries(
     soup: BeautifulSoup,
     url: str,
     html_str: str,
     fetch_manifest: Callable[[str], bytes] | None,
-) -> list[str]:
-    """Extract image URLs from IIIF manifest(s). Uses HTML-found and derived manifest URLs."""
+    ctx: DiscoveryContext | None = None,
+) -> list[tuple[str, dict[str, Any] | None]]:
     if not fetch_manifest:
         return []
+    out: list[tuple[str, dict[str, Any] | None]] = []
     manifest_urls = find_iiif_manifest_urls(soup, url, html_str)
     manifest_urls = list(dict.fromkeys(manifest_urls + find_derived_iiif_manifest_urls(url or "")))
-    urls: list[str] = []
     for manifest_url in manifest_urls:
         try:
             raw = fetch_manifest(manifest_url)
             data = json.loads(raw.decode("utf-8"))
-            urls.extend(parse_iiif_manifest(data))
+            _record_iiif_description(ctx, data, manifest_url)
+            for page in parse_iiif_manifest_pages(data, manifest_url=manifest_url):
+                out.append((page["url"], _page_meta_from_iiif_page(page)))
         except Exception:
             pass
-    return urls
+    return out
 
 
-def _extract_generic_html(soup: BeautifulSoup, url: str) -> list[str]:
-    """Extract image URLs from standard HTML elements."""
-    return find_image_urls(soup, url)
-
-
-def _extract_hathitrust(url: str, html_str: str) -> list[str]:
-    """Extract image URLs using HathiTrust imgsrv (full-res from thumbnails)."""
-    return find_hathitrust_imgsrv_urls(html_str, url)
-
-
-def _extract_archive_org(
+def collect_image_entries(
+    soup: BeautifulSoup,
     url: str,
     html_str: str,
-    fetch_manifest: Callable[[str], bytes] | None,
-) -> list[str]:
-    """Extract image URLs from Internet Archive via adapter (IIIF + metadata API fallback)."""
-    from strigil.adapters import ALL_ADAPTERS
+    *,
+    fetch_manifest: Callable[[str], bytes] | None = None,
+    limit: int | None = None,
+    context: DiscoveryContext | None = None,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """
+    Like collect_image_urls but returns (image_url, manuscript_meta) per image.
+    manuscript_meta includes IIIF canvas labels, manifest URLs, and discovery_order when applicable.
+    """
+    ctx = context or DiscoveryContext(url=url or "")
+    raw: list[tuple[str, dict[str, Any] | None, int]] = []
+    seen: set[str] = set()
+    disc_seq = 0
 
-    for adapter in ALL_ADAPTERS:
-        if adapter.matches(url or ""):
-            return adapter.extract_image_urls(url or "", html_str or "", fetch_manifest)
-    return []
+    def add(u: str, meta: dict[str, Any] | None = None) -> None:
+        nonlocal disc_seq
+        if not u or should_skip_image_url(u) or u in seen:
+            return
+        seen.add(u)
+        disc = disc_seq
+        disc_seq += 1
+        if ctx.manuscript_mode:
+            m = dict(meta) if meta else {}
+            m["discovery_order"] = disc + 1
+            raw.append((u, m, disc))
+        elif meta:
+            m = dict(meta)
+            m["discovery_order"] = disc + 1
+            raw.append((u, m, disc))
+        else:
+            raw.append((u, None, disc))
 
+    def finalize() -> list[tuple[str, dict[str, Any] | None]]:
+        if ctx.manuscript_mode:
+            ordered = sorted(raw, key=lambda x: x[2])
+        else:
+            ordered = sorted(raw, key=lambda x: (-image_format_priority(x[0]), x[2]))
+        out = [(u, m) for u, m, _ in ordered]
+        if limit is not None:
+            out = out[:limit]
+        return out
 
-def _extract_wellcome(
-    url: str,
-    html_str: str,
-    fetch_manifest: Callable[[str], bytes] | None,
-) -> list[str]:
-    """Extract image URLs from Wellcome Collection via adapter (Catalogue API -> IIIF manifest)."""
-    from strigil.adapters import ALL_ADAPTERS
+    # When source_hint is set, try that adapter first
+    if ctx.source_hint:
+        from strigil.adapters import ADAPTER_BY_SOURCE
 
-    for adapter in ALL_ADAPTERS:
-        if adapter.matches(url or ""):
-            return adapter.extract_image_urls(url or "", html_str or "", fetch_manifest)
-    return []
+        hint = ctx.source_hint.strip().lower()
+        adapter = ADAPTER_BY_SOURCE.get(hint)
+        if adapter and adapter.matches(url or ""):
+            if hint == "archive_org" and fetch_manifest:
+                for u, meta in _extract_archive_org_entries(url, html_str, fetch_manifest, ctx):
+                    add(u, meta)
+            elif hint == "wellcome" and fetch_manifest:
+                for u, meta in _extract_wellcome_entries(url, fetch_manifest, ctx):
+                    add(u, meta)
+            else:
+                for u in adapter.extract_image_urls(url or "", html_str or "", fetch_manifest):
+                    add(u, None)
+            if raw:
+                return finalize()
+
+    for detection in detect_image_schemas(url, soup, html_str):
+        schema = detection.schema
+
+        if schema == ImageSchema.GENERIC_HTML:
+            for u in find_image_urls(soup, url):
+                add(u, None)
+            continue
+
+        if schema == ImageSchema.ARCHIVE_ORG:
+            for u, meta in _extract_archive_org_entries(url, html_str, fetch_manifest, ctx):
+                add(u, meta)
+        elif schema == ImageSchema.WELLCOME:
+            for u, meta in _extract_wellcome_entries(url, fetch_manifest, ctx):
+                add(u, meta)
+        elif schema == ImageSchema.CONTENTDM:
+            for u in find_contentdm_full_res_urls(url, html_str):
+                add(u, None)
+        elif schema == ImageSchema.NYPL:
+            for u, meta in _extract_nypl_entries(url, html_str, fetch_manifest, ctx):
+                add(u, meta)
+        elif schema == ImageSchema.HATHITRUST:
+            for u in find_hathitrust_imgsrv_urls(html_str, url):
+                add(u, None)
+        elif schema == ImageSchema.IIIF_MANIFEST:
+            for u, meta in _extract_iiif_manifest_entries(soup, url, html_str, fetch_manifest, ctx):
+                add(u, meta)
+        elif schema in (ImageSchema.EEBO, ImageSchema.ECCO):
+            for u in find_image_urls(soup, url):
+                add(u, None)
+
+    expected = ctx.expected_images or infer_expected_images(html_str or "")
+    if expected and len(raw) < expected * FALLBACK_SHORTFALL_RATIO:
+        from strigil.adapters import ALL_ADAPTERS
+
+        for adapter in ALL_ADAPTERS:
+            if adapter.matches(url or ""):
+                adapter_urls = [
+                    u
+                    for u in adapter.extract_image_urls(url or "", html_str or "", fetch_manifest)
+                    if u and not should_skip_image_url(u)
+                ]
+                if adapter_urls and len(adapter_urls) > len(raw):
+                    new_seen: set[str] = set()
+                    new_raw: list[tuple[str, dict[str, Any] | None, int]] = []
+                    for i, u in enumerate(dict.fromkeys(adapter_urls)):
+                        if not u or should_skip_image_url(u):
+                            continue
+                        new_seen.add(u)
+                        if ctx.manuscript_mode:
+                            new_raw.append((u, {"discovery_order": i + 1}, i))
+                        else:
+                            new_raw.append((u, None, i))
+                    raw = new_raw
+                    seen = new_seen
+                break
+
+    return finalize()
 
 
 def collect_image_urls(
@@ -246,77 +414,9 @@ def collect_image_urls(
     Runs schema-specific extractors in priority order, dedupes, and optionally limits.
     When context.source_hint is set, tries that adapter first.
     """
-    img_urls: list[str] = []
-    seen: set[str] = set()
-    ctx = context or DiscoveryContext(url=url or "")
-
-    def add(u: str) -> None:
-        if u and not should_skip_image_url(u) and u not in seen:
-            seen.add(u)
-            img_urls.append(u)
-
-    # When source_hint is set, try that adapter first
-    if ctx.source_hint:
-        from strigil.adapters import ADAPTER_BY_SOURCE
-
-        hint = ctx.source_hint.strip().lower()
-        adapter = ADAPTER_BY_SOURCE.get(hint)
-        if adapter and adapter.matches(url or ""):
-            for u in adapter.extract_image_urls(url or "", html_str or "", fetch_manifest):
-                add(u)
-            if img_urls:
-                img_urls.sort(key=lambda u: -image_format_priority(u))
-                if limit is not None:
-                    img_urls = img_urls[:limit]
-                return img_urls
-
-    for detection in detect_image_schemas(url, soup, html_str):
-        schema = detection.schema
-
-        if schema == ImageSchema.GENERIC_HTML:
-            for u in _extract_generic_html(soup, url):
-                add(u)
-            continue
-
-        if schema == ImageSchema.ARCHIVE_ORG:
-            for u in _extract_archive_org(url, html_str, fetch_manifest):
-                add(u)
-        elif schema == ImageSchema.WELLCOME:
-            for u in _extract_wellcome(url, html_str, fetch_manifest):
-                add(u)
-        elif schema == ImageSchema.CONTENTDM:
-            for u in _extract_contentdm(url, html_str):
-                add(u)
-        elif schema == ImageSchema.NYPL:
-            for u in _extract_nypl(url, html_str, fetch_manifest):
-                add(u)
-        elif schema == ImageSchema.HATHITRUST:
-            for u in _extract_hathitrust(url, html_str):
-                add(u)
-        elif schema == ImageSchema.IIIF_MANIFEST:
-            for u in _extract_iiif_manifest(soup, url, html_str, fetch_manifest):
-                add(u)
-        elif schema in (ImageSchema.EEBO, ImageSchema.ECCO):
-            for u in _extract_generic_html(soup, url):
-                add(u)
-
-    # Fallback: when expected_images (user or inferred) suggests we should have more, try adapters
-    expected = ctx.expected_images or infer_expected_images(html_str or "")
-    if expected and len(img_urls) < expected * FALLBACK_SHORTFALL_RATIO:
-        from strigil.adapters import ALL_ADAPTERS
-
-        for adapter in ALL_ADAPTERS:
-            if adapter.matches(url or ""):
-                adapter_urls = [
-                    u for u in adapter.extract_image_urls(url or "", html_str or "", fetch_manifest)
-                    if u and not should_skip_image_url(u)
-                ]
-                if adapter_urls and len(adapter_urls) > len(img_urls):
-                    img_urls = list(dict.fromkeys(adapter_urls))
-                break
-
-    # Prioritize JPEG/TIFF (archival quality) before applying limit
-    img_urls.sort(key=lambda u: -image_format_priority(u))
-    if limit is not None:
-        img_urls = img_urls[:limit]
-    return img_urls
+    return [u for u, _ in collect_image_entries(
+        soup, url, html_str,
+        fetch_manifest=fetch_manifest,
+        limit=limit,
+        context=context,
+    )]

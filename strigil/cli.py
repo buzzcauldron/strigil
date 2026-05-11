@@ -228,6 +228,11 @@ def main() -> None:
         metavar="ADAPTER",
         help="Force a specific adapter (e.g. wellcome, archive_org) when auto-detection fails.",
     )
+    parser.add_argument(
+        "--manuscript",
+        action="store_true",
+        help="Preserve IIIF/manifest page order and write manifest.json manuscript section (labels, canvas ids, local paths).",
+    )
     args = parser.parse_args()
     out_dir = Path(args.out_dir)
 
@@ -337,6 +342,7 @@ def main() -> None:
                     human_bypass=getattr(args, "human_bypass", False),
                     expected_images=getattr(args, "expected_images", None),
                     source_hint=getattr(args, "source", None),
+                    manuscript_mode=getattr(args, "manuscript", False),
                 )
             else:
                 eff_workers = 1 if (args.crawl and args.js) else workers
