@@ -4,6 +4,7 @@ import random
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -113,6 +114,18 @@ DEFAULT_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# ORKA (Uni Kassel) runs Anubis: browser-like Chrome UAs get a proof-of-work HTML shell
+# for HTML, JSON manifests, and IIIF tiles; a non-browser-identifying UA receives content.
+ORKA_NETLOC = "orka.bibliothek.uni-kassel.de"
+ORKA_HTTP_USER_AGENT = "Strigil/1.0 (+https://github.com/buzzcauldron/strigil; IIIF)"
+
+
+def _httpx_headers_for_url(url: str) -> dict[str, str] | None:
+    """Extra headers merged into httpx requests for hosts with unusual bot filtering."""
+    if urlparse(url).netloc.lower() == ORKA_NETLOC:
+        return {"User-Agent": ORKA_HTTP_USER_AGENT}
+    return None
 
 
 class Fetcher:
@@ -310,7 +323,8 @@ class Fetcher:
             )
             try:
                 client = self._get_client()
-                resp = client.get(url, timeout=attempt_timeout)
+                extra = _httpx_headers_for_url(url)
+                resp = client.get(url, timeout=attempt_timeout, headers=extra)
                 # Auto-engage FlareSolverr on Cloudflare (403 or challenge page)
                 if not self._flaresolverr_url and not tried_flaresolverr:
                     is_cloudflare = (
@@ -405,7 +419,11 @@ class Fetcher:
                 raise
         # Non-browser or non-JSON: use simple GET
         client = self._get_client()
-        resp = client.get(url, timeout=min(self._timeout, MAX_TIMEOUT))
+        resp = client.get(
+            url,
+            timeout=min(self._timeout, MAX_TIMEOUT),
+            headers=_httpx_headers_for_url(url),
+        )
         resp.raise_for_status()
         return resp.content
 
@@ -455,7 +473,8 @@ class Fetcher:
             attempt_timeout = min(effective * (RETRY_BACKOFF ** attempt), MAX_TIMEOUT)
             try:
                 client = self._get_client()
-                with client.stream("GET", url, timeout=attempt_timeout) as resp:
+                extra = _httpx_headers_for_url(url)
+                with client.stream("GET", url, timeout=attempt_timeout, headers=extra) as resp:
                     resp.raise_for_status()
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(dest_path, "wb") as f:
@@ -472,7 +491,10 @@ class Fetcher:
                         alt = _iiif_alternate_url(url)
                         if alt:
                             try:
-                                with client.stream("GET", alt, timeout=attempt_timeout) as resp2:
+                                extra_alt = _httpx_headers_for_url(alt)
+                                with client.stream(
+                                    "GET", alt, timeout=attempt_timeout, headers=extra_alt
+                                ) as resp2:
                                     resp2.raise_for_status()
                                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                                     with open(dest_path, "wb") as f:
@@ -527,7 +549,7 @@ class Fetcher:
                 return None, None
         try:
             client = self._get_client()
-            resp = client.head(url, timeout=head_timeout)
+            resp = client.head(url, timeout=head_timeout, headers=_httpx_headers_for_url(url))
             resp.raise_for_status()
             ct = resp.headers.get("content-type", "")
             content_type = ct.split(";")[0].strip().lower() if ct else None
@@ -539,7 +561,9 @@ class Fetcher:
                 alt = _iiif_alternate_url(url)
                 if alt:
                     try:
-                        resp2 = client.head(alt, timeout=head_timeout)
+                        resp2 = client.head(
+                            alt, timeout=head_timeout, headers=_httpx_headers_for_url(alt)
+                        )
                         resp2.raise_for_status()
                         ct = resp2.headers.get("content-type", "")
                         content_type = ct.split(";")[0].strip().lower() if ct else None

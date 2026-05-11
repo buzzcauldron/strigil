@@ -958,6 +958,48 @@ def extract_text(soup: BeautifulSoup, raw_html: str | bytes = "") -> str:
     return _normalize_text(text)
 
 
+def extract_text_html(soup: BeautifulSoup, raw_html: str | bytes = "") -> str:
+    """
+    Extract main document content as HTML (lists, tables, div structure preserved).
+    Prefer readability-lxml summary HTML; else a cleaned clone of the main region
+    (#tabContent, main, article, .content, …) with script/style/nav stripped.
+    """
+    raw = raw_html if raw_html else str(soup)
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        from readability import Document
+
+        doc = Document(raw)
+        summary = doc.summary()
+        if summary and summary.strip():
+            frag = BeautifulSoup(summary, "lxml")
+            root = frag.body if frag.body else frag
+            for tag in root.select("script, style, noscript"):
+                tag.decompose()
+            inner = root.decode_contents().strip() if hasattr(root, "decode_contents") else str(root).strip()
+            if inner:
+                return inner
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    soup_copy = BeautifulSoup(str(soup), "lxml")
+    for tag in soup_copy.select("script, style, nav, header, footer, aside, noscript, iframe"):
+        tag.decompose()
+    main = soup_copy.select_one(
+        "#tabContent, .tab-content.panel, .tab-content, "
+        "main, article, [role='main'], .content, .article, .post-content, .entry-content, "
+        ".manuscript-content, #content, .container .row .col-md-9, .ms-description"
+    ) or soup_copy.find("body") or soup_copy
+    if not main:
+        return ""
+    if hasattr(main, "decode_contents"):
+        return main.decode_contents().strip()
+    return str(main).strip()
+
+
 def _normalize_text(s: str) -> str:
     """Normalize whitespace and ensure valid text."""
     lines = (line.strip() for line in s.splitlines())

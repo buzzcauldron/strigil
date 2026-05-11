@@ -28,6 +28,7 @@ from strigil.extractors import (
     find_page_links,
     find_pdf_urls,
     extract_text,
+    extract_text_html,
     get_best_image_url,
 )
 from strigil.fetcher import DEFAULT_TIMEOUT, Fetcher, MAX_TIMEOUT
@@ -43,6 +44,8 @@ from strigil.storage import (
     path_for_pdf_canonical,
     path_for_text,
     path_for_text_canonical,
+    path_for_text_html,
+    path_for_text_html_canonical,
     sanitize_domain,
     save_manifest,
     write_text,
@@ -121,6 +124,7 @@ class MapResult:
     pdf_urls: list[str] = field(default_factory=list)
     image_items: list[tuple[str, str, str, dict[str, Any] | None]] = field(default_factory=list)
     text: tuple[str, str] | None = None  # (page_url, extracted_text) or None
+    text_html: tuple[str, str] | None = None  # (page_url, main-content HTML) or None
     iiif_descriptions: list[dict[str, Any]] = field(default_factory=list)
     html_descriptions: list[dict[str, Any]] = field(default_factory=list)
 
@@ -413,6 +417,7 @@ def map_page(
     same_domain: str | None = None,
     use_browser: bool = False,
     discovery_context: DiscoveryContext | None = None,
+    preserve_text_html: bool = False,
 ) -> MapResult:
     """
     Map a page: fetch HTML, parse URLs, HEAD images for size filter. No downloads.
@@ -489,10 +494,15 @@ def map_page(
                 image_items.append((img_url, best_url, ct or "image", meta_by_url.get(img_url)))
 
     text: tuple[str, str] | None = None
+    text_html: tuple[str, str] | None = None
     if "text" in want:
         extracted = extract_text(soup, html_str)
         if extracted.strip():
             text = (url, extracted)
+        if preserve_text_html:
+            html_body = extract_text_html(soup, html_str)
+            if html_body.strip():
+                text_html = (url, html_body)
 
     return MapResult(
         page_url=url,
@@ -500,6 +510,7 @@ def map_page(
         pdf_urls=pdf_urls,
         image_items=image_items,
         text=text,
+        text_html=text_html,
         iiif_descriptions=list(discovery_context.iiif_descriptions) if discovery_context else [],
         html_descriptions=list(discovery_context.html_descriptions) if discovery_context else [],
     )
@@ -546,6 +557,19 @@ def scrape_assets(
                 progress_callback("text")
             print(f"  Text: {dest}", file=sys.stderr)
 
+    if result.text_html:
+        turl, html = result.text_html
+        th_map = manifest.setdefault("text_html", {})
+        if _exists(turl, "text_html"):
+            th_map[turl] = str(path_for_text_html_canonical(out_dir, domain, turl))
+        elif turl not in th_map:
+            dest_h = path_for_text_html(out_dir, domain, turl)
+            write_text(dest_h, html)
+            th_map[turl] = str(dest_h)
+            if progress_callback:
+                progress_callback("text")
+            print(f"  Text HTML: {dest_h}", file=sys.stderr)
+
     work: list[tuple[str, str, str | None, dict[str, Any] | None]] = []
     for u in result.pdf_urls:
         if u not in urls_map:
@@ -556,12 +580,13 @@ def scrape_assets(
 
     n_pdf = sum(1 for _, _, ct, _ in work if ct == "application/pdf")
     n_img = len(work) - n_pdf
-    n_text = 1 if result.text and not _exists(result.text[0], "text") else 0
-    total_assets = n_text + len(work)
+    total_assets = len(work)
     if total_assets > 0:
         parts = []
-        if n_text:
+        if result.text:
             parts.append("text")
+        if result.text_html:
+            parts.append("text HTML")
         if n_pdf:
             parts.append(f"{n_pdf} PDFs")
         if n_img:
@@ -677,6 +702,7 @@ def scrape_page(
     failed_list: list | None = None,
     failed_list_lock: threading.Lock | None = None,
     discovery_context: DiscoveryContext | None = None,
+    preserve_text_html: bool = False,
 ) -> list[str]:
     """
     Scrape a single page: PDFs, text, images (according to types).
@@ -728,6 +754,20 @@ def scrape_page(
                 if progress_callback:
                     progress_callback("text")
                 print(f"  Text: {dest}", file=sys.stderr)
+
+        if preserve_text_html:
+            html_body = extract_text_html(soup, html_str)
+            if html_body.strip():
+                th_map = manifest.setdefault("text_html", {})
+                if path_exists_for_resource(out_dir, domain, url, "text_html"):
+                    th_map[url] = str(path_for_text_html_canonical(out_dir, domain, url))
+                elif url not in th_map:
+                    dest_h = path_for_text_html(out_dir, domain, url)
+                    write_text(dest_h, html_body)
+                    th_map[url] = str(dest_h)
+                    if progress_callback:
+                        progress_callback("text")
+                    print(f"  Text HTML: {dest_h}", file=sys.stderr)
 
     # Build image work list (url for urls_map key, best_url to fetch, ct, dest, manuscript_meta)
     image_work: list[tuple[str, str, str, Path, dict[str, Any] | None]] = []
@@ -1124,6 +1164,7 @@ def run_single_or_sequential_crawl(
                             same_domain_for_links=link_filter,
                             failed_list=failed_list if retry_failed else None,
                             discovery_context=discovery_ctx,
+                            preserve_text_html=getattr(args, "text_html", False),
                         )
                         if use_progress:
                             pbar.set_postfix(queue=len(q))
@@ -1225,6 +1266,7 @@ def run_single_or_sequential_crawl(
                                 head_workers=min(SAFE_HEAD_WORKERS, workers),
                                 use_browser=use_browser,
                                 discovery_context=discovery_ctx,
+                                preserve_text_html=getattr(args, "text_html", False),
                             )
                             fetcher_ctx = (
                                 (lambda f: lambda: nullcontext(f))(iter_fetcher)
@@ -1232,10 +1274,12 @@ def run_single_or_sequential_crawl(
                                 else (lambda: Fetcher(timeout=60, use_browser=False, flaresolverr_url=getattr(args, "flaresolverr_url", None)))
                             )
                             n_pdf, n_img = len(map_result.pdf_urls), len(map_result.image_items)
-                            if n_pdf or n_img or map_result.text:
+                            if n_pdf or n_img or map_result.text or map_result.text_html:
                                 parts = []
                                 if map_result.text:
                                     parts.append("text")
+                                if map_result.text_html:
+                                    parts.append("text (HTML)")
                                 if n_pdf:
                                     parts.append(f"{n_pdf} PDFs")
                                 if n_img:
@@ -1277,6 +1321,7 @@ def run_single_or_sequential_crawl(
                                 max_image_size=max_image_size,
                                 failed_list=failed_list_sp if retry_failed else None,
                                 discovery_context=discovery_ctx,
+                                preserve_text_html=getattr(args, "text_html", False),
                             )
                             if retry_failed and failed_list_sp:
                                 print(f"  Retrying {len(failed_list_sp)} failed asset(s)...", file=sys.stderr)
@@ -1325,6 +1370,7 @@ def crawl_parallel(
     expected_images: int | None = None,
     source_hint: str | None = None,
     manuscript_mode: bool = False,
+    preserve_text_html: bool = False,
 ) -> None:
     """Crawl with a thread pool; each worker uses its own Fetcher, shared manifest lock."""
     start_domain = urlparse(start_url).netloc
@@ -1368,6 +1414,7 @@ def crawl_parallel(
                         failed_list=failed_list if retry_failed else None,
                         failed_list_lock=failed_list_lock,
                         discovery_context=discovery_ctx,
+                        preserve_text_html=preserve_text_html,
                     )
                 except Exception as e:
                     print(f"Error {url}: {e}", file=sys.stderr)

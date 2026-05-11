@@ -166,6 +166,23 @@ def path_for_text(out_dir: Path, domain: str, url: str) -> Path:
     return _ensure_unique(p)
 
 
+def _path_for_text_html_base(out_dir: Path, domain: str, url: str) -> Path:
+    """Canonical path for structured HTML extract (same slug as .txt, .html suffix)."""
+    slug = slug_from_url(url)
+    return out_dir / domain / "texts" / f"{slug}.html"
+
+
+def path_for_text_html(out_dir: Path, domain: str, url: str) -> Path:
+    """Return full path for HTML text extract."""
+    p = _path_for_text_html_base(out_dir, domain, url)
+    return _ensure_unique(p)
+
+
+def path_for_text_html_canonical(out_dir: Path, domain: str, url: str) -> Path:
+    """Canonical path for HTML text (skip-if-exists)."""
+    return _path_for_text_html_base(out_dir, domain, url)
+
+
 def write_text(path: Path, text: str) -> None:
     """Write text as UTF-8."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,4 +247,6 @@ def path_exists_for_resource(
         return path_for_image_canonical(out_dir, domain, url, content_type).exists()
     if kind == "text":
         return path_for_text_canonical(out_dir, domain, url).exists()
+    if kind == "text_html":
+        return path_for_text_html_canonical(out_dir, domain, url).exists()
     return False

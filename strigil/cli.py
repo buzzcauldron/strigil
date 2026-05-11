@@ -233,6 +233,12 @@ def main() -> None:
         action="store_true",
         help="Preserve IIIF/manifest page order and write manifest.json manuscript section (labels, canvas ids, local paths).",
     )
+    parser.add_argument(
+        "--text-html",
+        action="store_true",
+        dest="text_html",
+        help="When extracting text (--types text), also save main-content HTML (lists/tables/structure) beside .txt under texts/ and record paths in manifest text_html.",
+    )
     args = parser.parse_args()
     out_dir = Path(args.out_dir)
 
@@ -343,6 +349,7 @@ def main() -> None:
                     expected_images=getattr(args, "expected_images", None),
                     source_hint=getattr(args, "source", None),
                     manuscript_mode=getattr(args, "manuscript", False),
+                    preserve_text_html=getattr(args, "text_html", False),
                 )
             else:
                 eff_workers = 1 if (args.crawl and args.js) else workers
