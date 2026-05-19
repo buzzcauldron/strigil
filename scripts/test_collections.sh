@@ -30,7 +30,7 @@ echo "Output: $OUT"
 run "NYPL" "https://digitalcollections.nypl.org/items/1fbe4680-28ab-013b-27fe-0242ac110002" "--js"
 
 # HathiTrust (imgsrv)
-run "HathiTrust" "https://babel.hathitrust.org/cgi/pt?id=hvd.hn3jbn" "--js"
+run "HathiTrust" "https://babel.hathitrust.org/cgi/pt?id=hvd.hn3jbn" "--hathi-bypass"
 
 # Library of Congress (link alternate, generic)
 run "LOC" "https://www.loc.gov/item/75696521/"

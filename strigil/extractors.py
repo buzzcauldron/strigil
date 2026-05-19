@@ -445,36 +445,24 @@ def find_nypl_iiif_image_urls(raw_html: str) -> list[str]:
 
 def find_hathitrust_imgsrv_urls(raw_html: str, page_url: str) -> list[str]:
     """
-    Extract HathiTrust imgsrv image URLs from HTML and rewrite to full size.
-    Thumbnail: .../thumbnail?id=X;seq=Y;width=... -> image?id=X;seq=Y;size=100
-    Image: .../image?id=X;seq=Y;size=50 -> image?id=X;seq=Y;size=100 (100% = full)
+    Extract HathiTrust imgsrv image URLs from HTML and rewrite to full size (size=10000).
     """
+    from strigil.hathitrust import hathitrust_image_url
+
     urls: list[str] = []
     seen: set[str] = set()
 
     def add_full(url: str) -> None:
-        # Parse and rewrite to size=100 (full resolution)
         parsed = urlparse(url)
         if "hathitrust.org" not in parsed.netloc.lower():
             return
-        # HathiTrust uses ; as query separator; normalize for parse_qs
         query = (parsed.query or "").replace(";", "&")
         qs = parse_qs(query)
         if "id" not in qs:
             return
         vol_id = qs["id"][0]
-        seq = qs.get("seq", ["1"])[0]
-        # Build full-res URL: image?id=X;seq=Y;size=100
-        full_qs = {"id": vol_id, "seq": seq, "size": "100"}
-        new_query = urlencode(full_qs)
-        new_url = urlunparse((
-            parsed.scheme or "https",
-            parsed.netloc,
-            "/cgi/imgsrv/image",
-            "",
-            new_query,
-            "",
-        ))
+        seq = int(qs.get("seq", ["1"])[0])
+        new_url = hathitrust_image_url(vol_id, seq)
         if new_url not in seen:
             seen.add(new_url)
             urls.append(new_url)
@@ -482,18 +470,14 @@ def find_hathitrust_imgsrv_urls(raw_html: str, page_url: str) -> list[str]:
     for m in _HATHITRUST_IMGSRV_RE.finditer(raw_html):
         add_full(m.group(1))
 
-    # Also derive from page URL: pt?id=X;seq=Y -> image?id=X;seq=Y;size=100
     m = _HATHITRUST_PT_RE.search(page_url)
     if m:
         vol_id = m.group(1)
         parsed = urlparse(page_url)
-        # HathiTrust uses ; as query separator; normalize for parse_qs
         query = (parsed.query or "").replace(";", "&")
         qs = parse_qs(query)
-        seqs = qs.get("seq", ["1"])
-        for seq in seqs:
-            full_qs = {"id": vol_id, "seq": seq, "size": "100"}
-            full_url = f"https://babel.hathitrust.org/cgi/imgsrv/image?{urlencode(full_qs)}"
+        for seq in qs.get("seq", ["1"]):
+            full_url = hathitrust_image_url(vol_id, int(seq))
             if full_url not in seen:
                 seen.add(full_url)
                 urls.append(full_url)

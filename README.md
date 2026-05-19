@@ -129,6 +129,22 @@ strigil --url https://syri.ac/digimss/... --human-bypass --no-robots --crawl --m
 
 `--human-bypass` implies `--js` and uses a headed browser. For crawl mode, omit `--same-domain-only` to follow cross-domain links to manuscript viewers.
 
+### HathiTrust (babel.hathitrust.org)
+
+HathiTrust uses Cloudflare on `babel.hathitrust.org` and serves page scans via **imgsrv** (`/cgi/imgsrv/image?id=…;seq=N;size=10000`). Use **`--hathi-bypass`** for the full workflow:
+
+```bash
+strigil --url "https://babel.hathitrust.org/cgi/pt?id=hvd.hn3jbn" --hathi-bypass --types images --out-dir output/hathi
+```
+
+This enables `--js`, `--human-bypass`, and `--no-robots`, and enumerates **all pages** in the volume (from viewer HTML or embedded page count), at full scan resolution (`size=10000`).
+
+1. A browser window opens on the volume viewer URL.
+2. Solve the Cloudflare challenge if shown, then press **Enter** in the terminal.
+3. Strigil downloads every page image for that volume.
+
+Alternatively, run [FlareSolverr](#cloudflare-and-bot-protection) and scrape with `--flaresolverr --source hathitrust`.
+
 ## Building a standalone bundle
 
 To build a standalone folder with the CLI and GUI (no Python required on the target machine):

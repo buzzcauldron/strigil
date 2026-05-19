@@ -133,6 +133,11 @@ def main() -> None:
         help="Pause for you to solve Cloudflare/CAPTCHA in the browser, then continue. Requires --js, uses headed browser.",
     )
     parser.add_argument(
+        "--hathi-bypass",
+        action="store_true",
+        help="HathiTrust: human Cloudflare bypass + enumerate all volume pages (implies --js --human-bypass --no-robots).",
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
         default=3,
@@ -280,6 +285,13 @@ def main() -> None:
 
     if getattr(args, "human_bypass", False):
         args.js = True  # human bypass requires browser
+
+    if getattr(args, "hathi_bypass", False):
+        args.js = True
+        args.human_bypass = True
+        args.no_robots = True
+        if not getattr(args, "source", None):
+            args.source = "hathitrust"
 
     retry_from = getattr(args, "retry_from", None)
     if retry_from is not None:
