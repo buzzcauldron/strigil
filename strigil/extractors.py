@@ -53,14 +53,16 @@ _HATHITRUST_IMGSRV_RE = re.compile(
     r"(https?://(?:babel\.)?hathitrust\.org/cgi/imgsrv/(?:image|thumbnail)\?[^&\s]+)",
     re.IGNORECASE,
 )
-# EEBO (ProQuest): eebo.proquest.com, search.proquest.com/eebo, eebo.chadwyck.com
+# EEBO (ProQuest): eebo.proquest.com, search.proquest.com/eebo, eebo.chadwyck.com,
+# and the modern portal whose EEBO docs live under www.proquest.com/eebo/docview/...
 _EEBO_DOMAIN_RE = re.compile(
-    r"(?:eebo\.proquest\.com|search\.proquest\.com|eebo\.chadwyck\.com)",
+    r"(?:eebo\.proquest\.com|search\.proquest\.com|eebo\.chadwyck\.com|"
+    r"(?:www\.)?proquest\.com/eebo[/?])",
     re.IGNORECASE,
 )
-# ECCO (Gale): link.gale.com/apps/ECCO
+# ECCO (Gale): link.gale.com/apps/ECCO and go.gale.com/ps/...?p=ECCO
 _ECCO_DOMAIN_RE = re.compile(
-    r"link\.gale\.com/apps/ECCO",
+    r"(?:link\.gale\.com/apps/ECCO|gale\.com/(?:apps/ECCO|ps/).*ECCO)",
     re.IGNORECASE,
 )
 # IIIF Image API URL with size/region (e.g. /full/pct:15/) -> we want full size (full/full; max not supported on all servers)

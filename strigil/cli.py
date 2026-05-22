@@ -231,7 +231,7 @@ def main() -> None:
         type=str,
         default=None,
         metavar="ADAPTER",
-        help="Force a specific adapter (e.g. wellcome, archive_org) when auto-detection fails.",
+        help="Force a specific adapter (e.g. wellcome, archive_org, eebo, ecco) when auto-detection fails.",
     )
     parser.add_argument(
         "--manuscript",

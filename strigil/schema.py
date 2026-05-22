@@ -367,8 +367,15 @@ def collect_image_entries(
         elif schema == ImageSchema.IIIF_MANIFEST:
             for u, meta in _extract_iiif_manifest_entries(soup, url, html_str, fetch_manifest, ctx):
                 add(u, meta)
-        elif schema in (ImageSchema.EEBO, ImageSchema.ECCO):
-            for u in find_image_urls(soup, url):
+        elif schema == ImageSchema.EEBO:
+            for u in _extract_paywalled_adapter(
+                url, html_str, fetch_manifest, source_key="eebo"
+            ):
+                add(u, None)
+        elif schema == ImageSchema.ECCO:
+            for u in _extract_paywalled_adapter(
+                url, html_str, fetch_manifest, source_key="ecco"
+            ):
                 add(u, None)
 
     expected = ctx.expected_images or infer_expected_images(html_str or "")
@@ -398,6 +405,22 @@ def collect_image_entries(
                 break
 
     return finalize()
+
+
+def _extract_paywalled_adapter(
+    url: str,
+    html_str: str,
+    fetch_manifest: Callable[[str], bytes] | None,
+    *,
+    source_key: str,
+) -> list[str]:
+    """Run a single paywalled adapter (EEBO / ECCO) by source hint key."""
+    from strigil.adapters import ADAPTER_BY_SOURCE
+
+    adapter = ADAPTER_BY_SOURCE.get(source_key)
+    if adapter and adapter.matches(url or ""):
+        return adapter.extract_image_urls(url or "", html_str or "", fetch_manifest)
+    return []
 
 
 def collect_image_urls(

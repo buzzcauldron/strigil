@@ -36,7 +36,7 @@ Use `--js` for JS-heavy pages (e.g. NYPL Digital Collections). Playwright and Ch
 
 **Supported archival sources:** NYPL Digital Collections, CONTENTdm, IIIF manifests, HathiTrust (babel.hathitrust.org), EEBO (ProQuest), ECCO (Gale), Internet Archive (full IIIF + metadata API fallback), Wellcome Collection (Catalogue API → IIIF manifest), Stanford PURL, Digital Bodleian, Library of Congress.
 
-**Discovery hints:** Use `--expected-images N` when a page should have ~N images (triggers fallbacks if fewer found). Use `--source ADAPTER` to force a specific adapter (e.g. `wellcome`, `archive_org`) when auto-detection fails.
+**Discovery hints:** Use `--expected-images N` when a page should have ~N images (triggers fallbacks if fewer found). Use `--source ADAPTER` to force a specific adapter (e.g. `wellcome`, `archive_org`, `eebo`, `ecco`) when auto-detection fails. For **EEBO** (ProQuest) and **ECCO** (Gale), adapters search Internet Archive first for open-access PDFs, then fall back to vendor PDF links in the page HTML (requires a logged-in session; load cookies with `strigil.auth.load_browser_cookies("proquest.com")` or `"gale.com"`).
 
 Optional: install tqdm for a progress bar (per-page in crawl, per-asset on single page):
 
