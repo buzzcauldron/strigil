@@ -145,6 +145,47 @@ This enables `--js`, `--human-bypass`, and `--no-robots`, and enumerates **all p
 
 Alternatively, run [FlareSolverr](#cloudflare-and-bot-protection) and scrape with `--flaresolverr --source hathitrust`.
 
+### JS-rendered pages without a browser
+
+A site using JavaScript often does not require a JS engine. Two patterns leave the
+data reachable over plain HTTP:
+
+1. The payload is already in the HTML, in a `<script>` tag, and JS only moves it
+   into the DOM — Next.js (`__NEXT_DATA__`), Nuxt (`__NUXT__`), Redux/Vue SSR
+   (`window.__INITIAL_STATE__`), Apollo (`__APOLLO_STATE__`), schema.org JSON-LD.
+2. The page is an empty shell that fetches content from a JSON API, usually a
+   plain GET, often discoverable from the shell's own markup.
+
+Trying these before `--js` is strictly cheaper: no browser launch (~1–3 s and
+~300 MB RSS each), no `playwright install`, no headless fingerprint for bot
+detection to catch, and it works where a browser cannot run at all.
+
+When a plain fetch returns a shell, strigil now says so instead of silently
+handing back an empty page:
+
+```
+Note: https://lib.example/item/1 returned a JS shell (0 visible chars).
+  Data IS present in the page without a browser: __INITIAL_STATE__.
+  Candidate data endpoint(s): https://lib.example/iiif/a/manifest.json
+```
+
+To work with the payload directly:
+
+```python
+from strigil.embedded import extract_embedded_json
+
+data = extract_embedded_json(html, base_url=url)
+data.sources      # {'__NEXT_DATA__': {...}, 'json-ld': [...]}
+data.api_urls     # ['https://.../manifest.json', ...]  IIIF manifests first
+data.js_shelled   # True when scripts present but almost no visible text
+```
+
+`iter_json_strings(obj)` pulls every long string out of a state blob whose schema
+you have not mapped yet — useful for finding transcription or description text.
+
+Escalate to `--js`, `--human-bypass`, or `--flaresolverr` only when this finds
+nothing.
+
 ## Building a standalone bundle
 
 To build a standalone folder with the CLI and GUI (no Python required on the target machine):

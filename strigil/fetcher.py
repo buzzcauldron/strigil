@@ -144,6 +144,7 @@ class Fetcher:
         self._timeout = timeout
         self._headers = {**DEFAULT_HEADERS, **(headers or {})}
         self._use_browser = use_browser
+        self._warned_js_shell = False
         self._flaresolverr_url = flaresolverr_url
         self._headed = headed or human_bypass  # human bypass requires visible browser
         self._human_bypass = human_bypass
@@ -250,6 +251,49 @@ class Fetcher:
     def __exit__(self, *args: object) -> None:
         self.close()
 
+    def _warn_if_js_shelled(self, url: str, content: bytes) -> None:
+        """Report a client-side shell instead of returning it silently.
+
+        A 200 whose body carries scripts but almost no visible text will never
+        yield content over plain HTTP, and previously the caller just received the
+        empty shell and found nothing. Say so, and say whether the payload is
+        already reachable without a browser: many such pages keep their data in a
+        script tag (Next.js/Nuxt/Redux/JSON-LD) or behind a plain-GET JSON
+        endpoint, so --js is often avoidable. Diagnostic only -- the return value
+        is unchanged, and it fires at most once per Fetcher.
+        """
+        if self._use_browser or self._warned_js_shell:
+            return
+        try:
+            from strigil.embedded import extract_embedded_json
+
+            data = extract_embedded_json(content, base_url=url)
+            if not data.js_shelled:
+                return
+            self._warned_js_shell = True
+            print(
+                f"  Note: {url} returned a JS shell "
+                f"({data.visible_chars} visible chars).",
+                file=sys.stderr,
+            )
+            if data.sources:
+                print(
+                    "    Data IS present in the page without a browser: "
+                    f"{', '.join(sorted(data.sources))}. "
+                    "See strigil.embedded.extract_embedded_json().",
+                    file=sys.stderr,
+                )
+            if data.api_urls:
+                print(
+                    f"    Candidate data endpoint(s): {'; '.join(data.api_urls[:3])}",
+                    file=sys.stderr,
+                )
+            if not data.sources and not data.api_urls:
+                print("    No embedded payload found; --js may be required.", file=sys.stderr)
+        except Exception:
+            # A diagnostic must never break a successful fetch.
+            pass
+
     def fetch_html(self, url: str, *, delay: float = 0) -> tuple[bytes, str]:
         """Fetch HTML; returns (raw_bytes, charset). Uses FlareSolverr, browser (Playwright), or httpx."""
         if self._flaresolverr_url:
@@ -355,6 +399,7 @@ class Fetcher:
                         continue
                 # Decay throttle after success
                 self._rate_limit_delay = max(0.0, self._rate_limit_delay * 0.9)
+                self._warn_if_js_shelled(url, resp.content)
                 return resp.content, resp.charset_encoding or "utf-8"
             except (httpx.HTTPStatusError, httpx.RequestError) as e:
                 last_exc = e
@@ -456,8 +501,8 @@ class Fetcher:
                         print(f"  502 Bad Gateway; waiting {wait:.0f}s then retrying...", file=sys.stderr)
                     _polite_sleep(wait)
                     continue
-                # IIIF 501 Not Implemented: try alternate size (full/full <-> full/max)
-                if resp.status == 501:
+                # IIIF 501/400: try alternate size (full/full <-> full/max)
+                if resp.status in (400, 501):
                     alt = _iiif_alternate_url(url)
                     if alt:
                         resp2 = ctx.request.get(alt, timeout=attempt_timeout_ms, headers=headers or None)
@@ -486,8 +531,8 @@ class Fetcher:
                 r = getattr(e, "response", None)
                 if r is not None:
                     code = getattr(r, "status_code", None)
-                    # IIIF 501 Not Implemented: try alternate size (full/full <-> full/max)
-                    if code == 501:
+                    # IIIF 501/400: try alternate size (full/full <-> full/max)
+                    if code in (400, 501):
                         alt = _iiif_alternate_url(url)
                         if alt:
                             try:
@@ -529,7 +574,7 @@ class Fetcher:
                 headers = {"Referer": self._page_url} if self._page_url else {}
                 resp = ctx.request.head(url, timeout=head_timeout * 1000, headers=headers or None)
                 if not resp.ok:
-                    if resp.status == 501:
+                    if resp.status in (400, 501):
                         alt = _iiif_alternate_url(url)
                         if alt:
                             resp2 = ctx.request.head(alt, timeout=head_timeout * 1000, headers=headers or None)
@@ -557,7 +602,7 @@ class Fetcher:
             content_length = int(cl) if cl is not None and cl.isdigit() else None
             return content_type, content_length
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 501:
+            if e.response.status_code in (400, 501):
                 alt = _iiif_alternate_url(url)
                 if alt:
                     try:
