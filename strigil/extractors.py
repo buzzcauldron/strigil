@@ -39,6 +39,21 @@ _STANFORD_PURL_RE = re.compile(
     r"purl\.stanford\.edu/([a-z0-9_-]+)",
     re.IGNORECASE,
 )
+# BSB München: digitale-sammlungen.de/[{lang}/]view/{id} -> api.digitale-sammlungen.de
+_BSB_ITEM_RE = re.compile(
+    r"digitale-sammlungen\.de/(?:[a-z]{2}/)?view/([a-zA-Z0-9_-]+)",
+    re.IGNORECASE,
+)
+# Vatican: digi.vatlib.it/mss/detail/{id} -> digi.vatlib.it/iiif/MSS_{id}/manifest.json
+_VATLIB_DETAIL_RE = re.compile(
+    r"digi\.vatlib\.it/(?:mss/)?detail/([^/?#\s]+)",
+    re.IGNORECASE,
+)
+# BnF Gallica: gallica.bnf.fr/ark:/12148/{id}[/...] -> gallica.bnf.fr/iiif/ark:/12148/{id}/manifest.json
+_GALLICA_ARK_RE = re.compile(
+    r"gallica\.bnf\.fr/ark:/12148/([a-zA-Z0-9]+)",
+    re.IGNORECASE,
+)
 # Wellcome Collection: wellcomecollection.org/works/{id} -> Catalogue API + IIIF manifest
 _WELLCOME_WORKS_RE = re.compile(
     r"wellcomecollection\.org/works/([a-z0-9_-]+)",
@@ -590,6 +605,26 @@ def find_derived_iiif_manifest_urls(page_url: str) -> list[str]:
     m = _STANFORD_PURL_RE.search(combined)
     if m:
         add(f"https://purl.stanford.edu/{m.group(1)}/iiif/manifest")
+
+    # 6. BSB München (Bavarian State Library): digitale-sammlungen.de/[lang/]view/{id}
+    m = _BSB_ITEM_RE.search(combined)
+    if m:
+        add(f"https://api.digitale-sammlungen.de/iiif/presentation/v2/{m.group(1)}/manifest")
+
+    # 7. Vatican Digital Library: digi.vatlib.it/mss/detail/{id}
+    m = _VATLIB_DETAIL_RE.search(combined)
+    if m:
+        add(f"https://digi.vatlib.it/iiif/MSS_{m.group(1)}/manifest.json")
+
+    # 8. BnF Gallica: gallica.bnf.fr/ark:/12148/{id}[/folio-etc]
+    m = _GALLICA_ARK_RE.search(combined)
+    if m:
+        add(f"https://gallica.bnf.fr/iiif/ark:/12148/{m.group(1)}/manifest.json")
+
+    # 5. URL itself is a IIIF manifest endpoint (direct manifest URL passed as --url)
+    stripped_path = path.split("?")[0]
+    if stripped_path.endswith("/manifest") or stripped_path.endswith("/manifest.json"):
+        add(page_url)
 
     return urls
 

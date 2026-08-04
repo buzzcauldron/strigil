@@ -391,10 +391,17 @@ def head_one_image(
     img_url: str, fetcher: Fetcher, delay: float, *, use_shared: bool = True
 ) -> tuple[str, str, str | None, int | None] | None:
     """HEAD one image; return (url, best_url, content_type, content_length) or None."""
+    from strigil.fetcher import _iiif_alternate_url
     f = fetcher if use_shared else Fetcher(timeout=10, use_browser=False)
     try:
         best = get_best_image_url(img_url, None, try_high_res=True)
         ct, cl = f.head_metadata(best, delay=delay)
+        if not ct:
+            alt = _iiif_alternate_url(best)
+            if alt:
+                ct, cl = f.head_metadata(alt, delay=delay)
+                if ct:
+                    best = alt
         if ct and not ct.startswith("image/"):
             best = img_url
             ct, cl = f.head_metadata(img_url, delay=delay)

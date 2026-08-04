@@ -42,7 +42,15 @@ def sanitize_basename(url: str, default_ext: str = "") -> str:
                     suffix = parts[-1].split("?")[0] if parts else "default"
                     name = f"{ident}_{suffix}"
                 else:
-                    name = parts[-1] or "index"
+                    # ident is not numeric/UUID — fall back to segment-before-/full/
+                    full_idx = next((i for i, p in enumerate(parts) if p.lower() == "full"), None)
+                    if full_idx and full_idx > 0:
+                        pre = parts[full_idx - 1]
+                        pre_stem = pre.rsplit(".", 1)[0] if "." in pre else pre
+                        suffix = parts[-1].split("?")[0] if parts else "default"
+                        name = f"{pre_stem}_{suffix}"
+                    else:
+                        name = parts[-1] or "index"
             else:
                 name = parts[-1] or "index"
         except StopIteration:
@@ -67,6 +75,28 @@ def sanitize_basename(url: str, default_ext: str = "") -> str:
                     name = f"{ident}_{suffix}"
                 else:
                     name = parts[-1] or "index"
+            else:
+                # Non-standard IIIF path (e.g. /iiif/image/v2/{id}/full/...): use segment before /full/
+                full_idx = next((i for i, p in enumerate(parts) if p.lower() == "full"), None)
+                if full_idx and full_idx > 0:
+                    pre_full = parts[full_idx - 1]
+                    ident_stem = pre_full.rsplit(".", 1)[0] if "." in pre_full else pre_full
+                    suffix = parts[-1].split("?")[0] if parts else "default"
+                    name = f"{ident_stem}_{suffix}"
+                else:
+                    name = parts[-1] or "index"
+        except StopIteration:
+            name = parts[-1] or "index"
+    elif "/full/" in path_lower and len(parts) >= 2:
+        # General IIIF Image API: {prefix}/{identifier}/full/{size}/{rotation}/{quality}.{format}
+        # Use the identifier (segment before /full/) to avoid filename collisions across pages
+        try:
+            idx = next(i for i, p in enumerate(parts) if p.lower() == "full")
+            if idx > 0:
+                ident = parts[idx - 1]
+                ident_stem = ident.rsplit(".", 1)[0] if "." in ident else ident
+                suffix = parts[-1].split("?")[0] if parts else "default"
+                name = f"{ident_stem}_{suffix}"
             else:
                 name = parts[-1] or "index"
         except StopIteration:
