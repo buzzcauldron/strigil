@@ -1388,7 +1388,8 @@ def crawl_parallel(
         print(CRAWL_TIP, file=sys.stderr)
         link_filter = start_domain if same_dom else None
         work_queue: Queue[tuple[str, int] | None] = Queue()
-        seen: set[str] = set()
+        seen: set[str] = set()  # urls already processed (or in-flight in a worker)
+        queued: set[str] = set()  # urls already put on work_queue (dedupe enqueue)
         seen_lock = threading.Lock()
         manifest_lock = threading.Lock()
         pending = 0
@@ -1396,6 +1397,12 @@ def crawl_parallel(
         failed_list: list[FailedAssetItem] = [] if retry_failed else []
         failed_list_lock = threading.Lock() if retry_failed else None
         pbar = tqdm(desc="Crawl", unit=" page", file=sys.stderr) if (tqdm and use_progress) else None
+
+        def _maybe_stop() -> None:
+            """Send poison pills only when no work remains to enqueue or run."""
+            if pending == 0:
+                for _ in range(workers):
+                    work_queue.put(None)
 
         def process_one(url: str, depth: int, fetcher: Fetcher) -> list[str]:
             if not no_robots and not can_fetch(url):
@@ -1449,45 +1456,48 @@ def crawl_parallel(
                     if depth > max_depth:
                         with pending_lock:
                             pending -= 1
-                            if pending == 0:
-                                for _ in range(workers):
-                                    work_queue.put(None)
+                            _maybe_stop()
                         continue
                     with seen_lock:
                         if url in seen:
                             with pending_lock:
                                 pending -= 1
-                                if pending == 0:
-                                    for _ in range(workers):
-                                        work_queue.put(None)
+                                _maybe_stop()
                             continue
                         seen.add(url)
                     print(f"\n[{depth}] {url}", file=sys.stderr)
+                    links: list[str] = []
                     try:
                         links = process_one(url, depth, fetcher)
+                    except Exception as e:
+                        print(f"Error {url}: {e}", file=sys.stderr)
                     finally:
+                        # Enqueue children *before* marking this task done so
+                        # pending never hits 0 while discovered URLs remain.
+                        new_jobs: list[tuple[str, int]] = []
+                        for link in links:
+                            if same_dom and urlparse(link).netloc != start_domain:
+                                continue
+                            with seen_lock:
+                                if link in seen or link in queued:
+                                    continue
+                                queued.add(link)
+                            new_jobs.append((link, depth + 1))
                         with pending_lock:
+                            for job in new_jobs:
+                                work_queue.put(job)
+                                pending += 1
                             pending -= 1
                             if pbar is not None:
                                 pbar.set_postfix(pending=pending)
-                            if pending == 0:
-                                for _ in range(workers):
-                                    work_queue.put(None)
+                            _maybe_stop()
                         if pbar is not None:
                             pbar.update(1)
-                    for link in links:
-                        if same_dom and urlparse(link).netloc != start_domain:
-                            continue
-                        with seen_lock:
-                            if link in seen:
-                                continue
-                            seen.add(link)
-                        work_queue.put((link, depth + 1))
-                        with pending_lock:
-                            pending += 1
             finally:
                 fetcher.close()
 
+        with seen_lock:
+            queued.add(start_url)
         with pending_lock:
             pending = 1
         work_queue.put((start_url, 0))
